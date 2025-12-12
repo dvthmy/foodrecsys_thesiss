@@ -1,5 +1,5 @@
-"""API package for Flask routes."""
+"""API package for FastAPI routes."""
 
-from src.api.routes import api_bp
+from src.api.routes import router
 
-__all__ = ["api_bp"]
+__all__ = ["router"]

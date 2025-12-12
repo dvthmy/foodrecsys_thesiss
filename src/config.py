@@ -23,11 +23,11 @@ class Config:
     NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD: str = os.getenv("NEO4J_PASSWORD", "")
 
-    # Flask Configuration
-    FLASK_ENV: str = os.getenv("FLASK_ENV", "development")
-    FLASK_DEBUG: bool = os.getenv("FLASK_DEBUG", "0") == "1"
-    FLASK_HOST: str = os.getenv("FLASK_HOST", "0.0.0.0")
-    FLASK_PORT: int = int(os.getenv("FLASK_PORT", "5000"))
+    # Server Configuration
+    APP_ENV: str = os.getenv("APP_ENV", "development")
+    APP_DEBUG: bool = os.getenv("APP_DEBUG", "0") == "1"
+    APP_HOST: str = os.getenv("APP_HOST", "0.0.0.0")
+    APP_PORT: int = int(os.getenv("APP_PORT", "8000"))
 
     # File Upload Configuration
     MAX_CONTENT_LENGTH: int = int(os.getenv("MAX_CONTENT_LENGTH", str(16 * 1024 * 1024)))  # 16MB

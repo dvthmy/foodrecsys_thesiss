@@ -1,42 +1,45 @@
 """Food Recommendation System - Main Entry Point.
 
-Provides Flask application factory and CLI commands for:
-- Running the API server
+Provides FastAPI application factory and CLI commands for:
+- Running the API server with uvicorn
 - Initializing database constraints
 """
 
 import argparse
 import sys
 
-from flask import Flask
+import uvicorn
+from fastapi import FastAPI
 
 from src.config import config
-from src.api.routes import api_bp
+from src.api.routes import router
 from src.services.neo4j_service import Neo4jService
 from src.pipeline.batch_processor import get_processor
 
 
-def create_app() -> Flask:
-    """Create and configure the Flask application.
+def create_app() -> FastAPI:
+    """Create and configure the FastAPI application.
 
     Returns:
-        Configured Flask application instance.
+        Configured FastAPI application instance.
     """
-    app = Flask(__name__)
+    app = FastAPI(
+        title="Food Recommendation System",
+        description="API for extracting ingredients from dish images using Gemini AI",
+        version="0.1.0",
+    )
 
-    # Configure Flask
-    app.config["MAX_CONTENT_LENGTH"] = config.MAX_CONTENT_LENGTH
-
-    # Register blueprints
-    app.register_blueprint(api_bp)
+    # Include API router
+    app.include_router(router)
 
     # Add root route
-    @app.route("/")
-    def index():
+    @app.get("/")
+    async def index():
         return {
             "name": "Food Recommendation System",
             "version": "0.1.0",
             "description": "API for extracting ingredients from dish images using Gemini AI",
+            "docs": "/docs",
             "endpoints": {
                 "health": "/api/v1/health",
                 "upload": "POST /api/v1/dishes/upload",
@@ -80,7 +83,7 @@ def init_database() -> None:
 
 
 def run_server() -> None:
-    """Run the Flask development server."""
+    """Run the FastAPI server with uvicorn."""
     # Validate config
     missing = config.validate()
     if missing:
@@ -90,11 +93,12 @@ def run_server() -> None:
     # Ensure temp directory exists
     config.ensure_temp_dir()
 
-    app = create_app()
-    app.run(
-        host=config.FLASK_HOST,
-        port=config.FLASK_PORT,
-        debug=config.FLASK_DEBUG,
+    uvicorn.run(
+        "main:create_app",
+        factory=True,
+        host=config.APP_HOST,
+        port=config.APP_PORT,
+        reload=config.APP_DEBUG,
     )
 
 
@@ -121,18 +125,18 @@ Examples:
         "--host",
         type=str,
         default=None,
-        help=f"Host to bind the server (default: {config.FLASK_HOST})",
+        help=f"Host to bind the server (default: {config.APP_HOST})",
     )
     parser.add_argument(
         "--port",
         type=int,
         default=None,
-        help=f"Port to bind the server (default: {config.FLASK_PORT})",
+        help=f"Port to bind the server (default: {config.APP_PORT})",
     )
     parser.add_argument(
-        "--debug",
+        "--reload",
         action="store_true",
-        help="Enable debug mode",
+        help="Enable auto-reload mode",
     )
 
     args = parser.parse_args()
@@ -142,11 +146,11 @@ Examples:
     else:
         # Override config with CLI args
         if args.host:
-            config.FLASK_HOST = args.host
+            config.APP_HOST = args.host
         if args.port:
-            config.FLASK_PORT = args.port
-        if args.debug:
-            config.FLASK_DEBUG = True
+            config.APP_PORT = args.port
+        if args.reload:
+            config.APP_DEBUG = True
 
         run_server()
 
