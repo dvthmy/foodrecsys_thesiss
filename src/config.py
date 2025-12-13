@@ -17,7 +17,7 @@ class Config:
 
     # Gemini API Configuration
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-
+    HF_API_KEY: str = os.getenv("HF_API_KEY", "")
     # Neo4j Database Configuration
     NEO4J_URI: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     NEO4J_USER: str = os.getenv("NEO4J_USER", "neo4j")

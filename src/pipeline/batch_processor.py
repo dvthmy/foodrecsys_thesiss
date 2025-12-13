@@ -17,9 +17,9 @@ from typing import Any
 
 from src.config import config
 from src.services.gemini_extractor import GeminiExtractor
+from src.services.gemma_extractor import GemmaExtractor, get_gemma_extractor
 from src.services.neo4j_service import Neo4jService
 from src.services.clip_embedder import CLIPEmbedder, get_clip_embedder
-
 
 class ProcessingStatus(Enum):
     """Status of a batch processing job."""
@@ -107,7 +107,7 @@ class BatchProcessor:
 
     def __init__(
         self,
-        gemini_extractor: GeminiExtractor | None = None,
+        extractor: GemmaExtractor | None = None,
         clip_embedder: CLIPEmbedder | None = None,
         neo4j_service: Neo4jService | None = None,
         max_workers: int | None = None,
@@ -115,12 +115,12 @@ class BatchProcessor:
         """Initialize the batch processor.
 
         Args:
-            gemini_extractor: Gemini extractor service instance.
+            extractor: Gemma extractor service instance.
             clip_embedder: CLIP embedder service instance.
             neo4j_service: Neo4j service instance.
             max_workers: Maximum concurrent workers. Defaults to config value.
         """
-        self._gemini = gemini_extractor
+        self._gemini = extractor
         self._clip = clip_embedder
         self._neo4j = neo4j_service
         self._max_workers = max_workers or config.MAX_WORKERS
@@ -130,10 +130,10 @@ class BatchProcessor:
         self._jobs_lock = threading.Lock()
 
     @property
-    def gemini(self) -> GeminiExtractor:
-        """Get or create Gemini extractor instance."""
+    def extractor(self) -> GemmaExtractor:
+        """Get or create  Extractor instance."""
         if self._gemini is None:
-            self._gemini = GeminiExtractor()
+            self._gemini = GemmaExtractor()
         return self._gemini
 
     @property
@@ -192,8 +192,8 @@ class BatchProcessor:
             # Step 1: Extract ingredients using Gemini (from description only)
             extraction = None
             if description:
-                logging.info("Extracting ingredients for item %s using Gemini...", item_id)
-                extraction = self.gemini.extract_from_description(description)
+                logging.info("Extracting ingredients for item %s using Gemma...", item_id)
+                extraction = self.extractor.extract_from_description(description)
             
             # Use provided dish_name or extracted one, or default
             final_dish_name = dish_name or (extraction.get("dish_name") if extraction else None) or "Unknown Dish"

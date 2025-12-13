@@ -13,7 +13,9 @@ from PIL import Image
 from transformers import CLIPProcessor, CLIPModel
 
 from src.config import config
+from huggingface_hub import login
 
+login(token=config.HF_API_KEY)
 
 class CLIPEmbedder:
     """Service for generating image embeddings using CLIP."""

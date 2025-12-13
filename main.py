@@ -17,7 +17,6 @@ from src.api.routes import router
 from src.services.neo4j_service import Neo4jService
 from src.pipeline.batch_processor import get_processor
 
-
 # Configure logging to file for background job debugging
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +26,9 @@ logging.basicConfig(
         logging.FileHandler("food-recsys.log"),
     ],
 )
+
+# Suppress noisy watchfiles logger (triggers on every log write causing spam)
+logging.getLogger("watchfiles").setLevel(logging.WARNING)
 
 
 def create_app() -> FastAPI:
