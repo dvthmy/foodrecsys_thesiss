@@ -43,6 +43,7 @@ A Food Recommendation System that suggests the best dishes based on user prefere
 - User -[PREFERS]-> Ingredient: Represents a user's preference for certain ingredients.
 - User -[AVOIDS]-> Ingredient: Represents a user's dietary restrictions.
 - Ingredient -[SUITED_FOR]-> Dietary Restriction: Represents which ingredients are suitable for certain dietary restrictions.
+- Ingredient -[NOT_SUITED_FOR]-> Dietary Restriction: Represents which ingredients are not suitable for certain dietary restrictions.
 - User -[FOLLOWS]-> Dietary Restriction: Represents a user's dietary restrictions.
 
 ## Use Cases:

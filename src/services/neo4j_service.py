@@ -550,3 +550,275 @@ class Neo4jService:
         with self.session() as session:
             result = session.run(query, ingredients=ingredients).single()
             return result["count"] if result else 0
+
+    # =========================================================================
+    # Dietary Restriction Methods
+    # =========================================================================
+
+    def create_dietary_restriction(
+        self,
+        name: str,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a dietary restriction node.
+
+        Args:
+            name: Restriction name (e.g., "vegetarian", "dairy-allergy").
+            description: Optional description of the restriction.
+
+        Returns:
+            Dictionary with restriction data.
+        """
+        query = """
+        MERGE (r:DietaryRestriction {name: toLower(trim($name))})
+        ON CREATE SET
+            r.description = $description,
+            r.created_at = datetime()
+        ON MATCH SET
+            r.description = COALESCE($description, r.description),
+            r.updated_at = datetime()
+        RETURN r.name AS name, r.description AS description
+        """
+
+        with self.session() as session:
+            result = session.run(query, name=name, description=description).single()
+            return dict(result) if result else {"name": name.lower().strip(), "description": description}
+
+    def create_ingredient_restriction_relationship(
+        self,
+        ingredient_name: str,
+        restriction_name: str,
+        relationship_type: str,
+    ) -> dict[str, Any] | None:
+        """Create a relationship between an ingredient and dietary restriction.
+
+        Args:
+            ingredient_name: Name of the ingredient.
+            restriction_name: Name of the dietary restriction.
+            relationship_type: Either "SUITED_FOR" or "NOT_SUITED_FOR".
+
+        Returns:
+            Dictionary with relationship info, or None if nodes not found.
+
+        Raises:
+            ValueError: If relationship_type is invalid.
+        """
+        if relationship_type not in ("SUITED_FOR", "NOT_SUITED_FOR"):
+            raise ValueError(f"Invalid relationship_type: {relationship_type}. Must be 'SUITED_FOR' or 'NOT_SUITED_FOR'")
+
+        # Use APOC or dynamic relationship - here we use conditional queries
+        if relationship_type == "SUITED_FOR":
+            query = """
+            MATCH (i:Ingredient {name: toLower(trim($ingredient_name))})
+            MATCH (r:DietaryRestriction {name: toLower(trim($restriction_name))})
+            MERGE (i)-[rel:SUITED_FOR]->(r)
+            ON CREATE SET rel.created_at = datetime()
+            RETURN i.name AS ingredient, r.name AS restriction, type(rel) AS relationship
+            """
+        else:
+            query = """
+            MATCH (i:Ingredient {name: toLower(trim($ingredient_name))})
+            MATCH (r:DietaryRestriction {name: toLower(trim($restriction_name))})
+            MERGE (i)-[rel:NOT_SUITED_FOR]->(r)
+            ON CREATE SET rel.created_at = datetime()
+            RETURN i.name AS ingredient, r.name AS restriction, type(rel) AS relationship
+            """
+
+        with self.session() as session:
+            result = session.run(
+                query,
+                ingredient_name=ingredient_name,
+                restriction_name=restriction_name,
+            ).single()
+            return dict(result) if result else None
+
+    def batch_create_dietary_restrictions(
+        self,
+        restrictions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Batch create dietary restrictions with ingredient relationships.
+
+        Creates DietaryRestriction nodes and their SUITED_FOR/NOT_SUITED_FOR
+        relationships to existing ingredients.
+
+        Args:
+            restrictions: List of dicts with keys:
+                - name: Restriction name
+                - description: Optional description
+                - suited_ingredients: List of ingredient names suited for this restriction
+                - not_suited_ingredients: List of ingredient names not suited
+
+        Returns:
+            Dictionary with counts of created restrictions and relationships.
+        """
+        # First, create all restriction nodes
+        create_restrictions_query = """
+        UNWIND $restrictions AS r
+        MERGE (dr:DietaryRestriction {name: toLower(trim(r.name))})
+        ON CREATE SET
+            dr.description = r.description,
+            dr.created_at = datetime()
+        ON MATCH SET
+            dr.description = COALESCE(r.description, dr.description),
+            dr.updated_at = datetime()
+        RETURN count(dr) AS count
+        """
+
+        # Create NOT_SUITED_FOR relationships
+        create_not_suited_query = """
+        UNWIND $mappings AS m
+        MATCH (i:Ingredient {name: toLower(trim(m.ingredient))})
+        MATCH (r:DietaryRestriction {name: toLower(trim(m.restriction))})
+        MERGE (i)-[rel:NOT_SUITED_FOR]->(r)
+        ON CREATE SET rel.created_at = datetime()
+        RETURN count(rel) AS count
+        """
+
+        # Create SUITED_FOR relationships
+        create_suited_query = """
+        UNWIND $mappings AS m
+        MATCH (i:Ingredient {name: toLower(trim(m.ingredient))})
+        MATCH (r:DietaryRestriction {name: toLower(trim(m.restriction))})
+        MERGE (i)-[rel:SUITED_FOR]->(r)
+        ON CREATE SET rel.created_at = datetime()
+        RETURN count(rel) AS count
+        """
+
+        # Build mapping lists
+        not_suited_mappings = []
+        suited_mappings = []
+
+        for restriction in restrictions:
+            restriction_name = restriction["name"]
+            for ing in restriction.get("not_suited_ingredients", []):
+                not_suited_mappings.append({
+                    "ingredient": ing,
+                    "restriction": restriction_name,
+                })
+            for ing in restriction.get("suited_ingredients", []):
+                suited_mappings.append({
+                    "ingredient": ing,
+                    "restriction": restriction_name,
+                })
+
+        with self.session() as session:
+            # Create restrictions
+            result = session.run(create_restrictions_query, restrictions=restrictions).single()
+            restrictions_count = result["count"] if result else 0
+
+            # Create NOT_SUITED_FOR relationships
+            result = session.run(create_not_suited_query, mappings=not_suited_mappings).single()
+            not_suited_count = result["count"] if result else 0
+
+            # Create SUITED_FOR relationships
+            result = session.run(create_suited_query, mappings=suited_mappings).single()
+            suited_count = result["count"] if result else 0
+
+        return {
+            "restrictions_created": restrictions_count,
+            "not_suited_relationships": not_suited_count,
+            "suited_relationships": suited_count,
+        }
+
+    def get_restrictions_for_ingredient(self, ingredient_name: str) -> dict[str, list[str]]:
+        """Get dietary restrictions associated with an ingredient.
+
+        Args:
+            ingredient_name: Name of the ingredient.
+
+        Returns:
+            Dictionary with 'suited_for' and 'not_suited_for' lists of restriction names.
+        """
+        query = """
+        MATCH (i:Ingredient {name: toLower(trim($name))})
+        OPTIONAL MATCH (i)-[:SUITED_FOR]->(suited:DietaryRestriction)
+        OPTIONAL MATCH (i)-[:NOT_SUITED_FOR]->(not_suited:DietaryRestriction)
+        RETURN collect(DISTINCT suited.name) AS suited_for,
+               collect(DISTINCT not_suited.name) AS not_suited_for
+        """
+
+        with self.session() as session:
+            result = session.run(query, name=ingredient_name).single()
+            if result:
+                return {
+                    "suited_for": [r for r in result["suited_for"] if r],
+                    "not_suited_for": [r for r in result["not_suited_for"] if r],
+                }
+            return {"suited_for": [], "not_suited_for": []}
+
+    def get_ingredients_for_restriction(self, restriction_name: str) -> dict[str, list[str]]:
+        """Get ingredients associated with a dietary restriction.
+
+        Args:
+            restriction_name: Name of the dietary restriction.
+
+        Returns:
+            Dictionary with 'suited' and 'not_suited' lists of ingredient names.
+        """
+        query = """
+        MATCH (r:DietaryRestriction {name: toLower(trim($name))})
+        OPTIONAL MATCH (suited:Ingredient)-[:SUITED_FOR]->(r)
+        OPTIONAL MATCH (not_suited:Ingredient)-[:NOT_SUITED_FOR]->(r)
+        RETURN collect(DISTINCT suited.name) AS suited,
+               collect(DISTINCT not_suited.name) AS not_suited
+        """
+
+        with self.session() as session:
+            result = session.run(query, name=restriction_name).single()
+            if result:
+                return {
+                    "suited": [i for i in result["suited"] if i],
+                    "not_suited": [i for i in result["not_suited"] if i],
+                }
+            return {"suited": [], "not_suited": []}
+
+    def get_all_dietary_restrictions(self) -> list[dict[str, Any]]:
+        """Retrieve all dietary restrictions with their ingredient counts.
+
+        Returns:
+            List of restriction dictionaries with name, description, and counts.
+        """
+        query = """
+        MATCH (r:DietaryRestriction)
+        OPTIONAL MATCH (suited:Ingredient)-[:SUITED_FOR]->(r)
+        OPTIONAL MATCH (not_suited:Ingredient)-[:NOT_SUITED_FOR]->(r)
+        RETURN r.name AS name,
+               r.description AS description,
+               count(DISTINCT suited) AS suited_count,
+               count(DISTINCT not_suited) AS not_suited_count
+        ORDER BY r.name
+        """
+
+        with self.session() as session:
+            result = session.run(query)
+            return [dict(record) for record in result]
+
+    def get_dietary_restriction(self, name: str) -> dict[str, Any] | None:
+        """Get a dietary restriction by name with full details.
+
+        Args:
+            name: Restriction name.
+
+        Returns:
+            Dictionary with restriction data, or None if not found.
+        """
+        query = """
+        MATCH (r:DietaryRestriction {name: toLower(trim($name))})
+        OPTIONAL MATCH (suited:Ingredient)-[:SUITED_FOR]->(r)
+        OPTIONAL MATCH (not_suited:Ingredient)-[:NOT_SUITED_FOR]->(r)
+        RETURN r.name AS name,
+               r.description AS description,
+               r.created_at AS created_at,
+               collect(DISTINCT suited.name) AS suited_ingredients,
+               collect(DISTINCT not_suited.name) AS not_suited_ingredients
+        """
+
+        with self.session() as session:
+            result = session.run(query, name=name).single()
+            if result:
+                data = dict(result)
+                # Filter out None values from collections
+                data["suited_ingredients"] = [i for i in data["suited_ingredients"] if i]
+                data["not_suited_ingredients"] = [i for i in data["not_suited_ingredients"] if i]
+                return data
+            return None

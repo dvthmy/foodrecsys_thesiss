@@ -52,7 +52,10 @@ Represents dietary restrictions (e.g., vegan, gluten-free).
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `name` | String | Restriction name |
+| `name` | String | Restriction name (e.g., "vegetarian", "dairy-allergy") |
+| `description` | String | Human-readable description |
+| `created_at` | DateTime | When created |
+| `updated_at` | DateTime | When last updated |
 
 ## Relationships
 
@@ -61,6 +64,8 @@ Represents dietary restrictions (e.g., vegan, gluten-free).
 ```
 (Dish)-[:CONTAINS]->(Ingredient)
 (Dish)-[:ORIGINATES_FROM]->(Country)
+(Ingredient)-[:SUITED_FOR]->(DietaryRestriction)
+(Ingredient)-[:NOT_SUITED_FOR]->(DietaryRestriction)
 ```
 
 ### Planned for Recommendation System
@@ -71,8 +76,21 @@ Represents dietary restrictions (e.g., vegan, gluten-free).
 (User)-[:PREFERS]->(Ingredient)
 (User)-[:AVOIDS]->(Ingredient)
 (User)-[:FOLLOWS]->(DietaryRestriction)
-(Ingredient)-[:SUITED_FOR]->(DietaryRestriction)
 ```
+
+## Seeded Dietary Restrictions
+
+The following dietary restrictions are pre-seeded with ingredient relationships:
+
+| Name | Description |
+|------|-------------|
+| `dairy-allergy` | Avoids all dairy products including milk, cheese, and butter |
+| `seafood-allergy` | Avoids all seafood including fish and shellfish |
+| `peanut-allergy` | Avoids peanuts and peanut-derived products |
+| `vegetarian` | No meat or fish, but eggs and dairy are allowed |
+| `low-carb` | Limits high-carbohydrate foods for keto or low-carb diets |
+
+Run `python main.py --seed-restrictions` to seed these restrictions.
 
 ## Constraints
 
@@ -151,8 +169,8 @@ RETURN d2.name, collect(i.name) AS common_ingredients
 │    Dish     │    │    Dish     │  │DietaryRestriction│
 └─────────────┘    └─────────────┘  └─────────────────┘
          │                                    ▲
-         │ CONTAINS                           │ SUITED_FOR
-         ▼                                    │
+         │ CONTAINS                           │ SUITED_FOR /
+         ▼                                    │ NOT_SUITED_FOR
 ┌─────────────┐                               │
 │ Ingredient  │───────────────────────────────┘
 └─────────────┘

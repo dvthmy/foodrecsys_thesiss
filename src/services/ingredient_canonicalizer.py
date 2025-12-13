@@ -238,7 +238,7 @@ Top similar existing ingredients (with similarity scores):
         """
         # Format candidates for prompt
         candidates_text = "\n".join(
-            f"- {c['name']} (similarity: {c['score']:.4f})"
+            f"- {c['name']}"
             for c in candidates[:self._top_k]
         )
 

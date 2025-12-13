@@ -136,6 +136,53 @@ def seed_ingredients() -> None:
         sys.exit(1)
 
 
+def seed_dietary_restrictions() -> None:
+    """Seed the database with dietary restrictions and their ingredient relationships."""
+    from src.data.dietary_restrictions import DIETARY_RESTRICTIONS
+
+    print("Seeding dietary restrictions...")
+    print(f"Found {len(DIETARY_RESTRICTIONS)} restrictions to seed")
+
+    try:
+        neo4j = Neo4jService()
+        neo4j.verify_connectivity()
+        print("Connected to Neo4j successfully!")
+
+        # Display what will be seeded
+        for restriction in DIETARY_RESTRICTIONS:
+            not_suited_count = len(restriction.get("not_suited_ingredients", []))
+            suited_count = len(restriction.get("suited_ingredients", []))
+            print(f"  - {restriction['name']}: {not_suited_count} not-suited, {suited_count} suited ingredients")
+
+        # Batch create restrictions and relationships
+        print("\nCreating restrictions and relationships...")
+        result = neo4j.batch_create_dietary_restrictions(DIETARY_RESTRICTIONS)
+
+        print(f"\nResults:")
+        print(f"  - Restrictions created/updated: {result['restrictions_created']}")
+        print(f"  - NOT_SUITED_FOR relationships: {result['not_suited_relationships']}")
+        print(f"  - SUITED_FOR relationships: {result['suited_relationships']}")
+
+        # Warn about missing ingredients
+        total_expected = sum(
+            len(r.get("not_suited_ingredients", [])) + len(r.get("suited_ingredients", []))
+            for r in DIETARY_RESTRICTIONS
+        )
+        total_created = result["not_suited_relationships"] + result["suited_relationships"]
+
+        if total_created < total_expected:
+            missing = total_expected - total_created
+            print(f"\n⚠️  Warning: {missing} ingredient(s) not found in database.")
+            print("   Run --seed-ingredients first to ensure all ingredients exist.")
+
+        neo4j.close()
+        print("\nSeeding complete!")
+
+    except Exception as e:
+        print(f"Error seeding dietary restrictions: {e}")
+        sys.exit(1)
+
+
 def run_server() -> None:
     """Run the FastAPI server with uvicorn."""
     # Validate config
@@ -166,6 +213,7 @@ Examples:
   python main.py                    # Run the API server
   python main.py --init-db          # Initialize database constraints
   python main.py --seed-ingredients # Seed canonical ingredients
+  python main.py --seed-restrictions # Seed dietary restrictions
   python main.py --host 0.0.0.0     # Run server on specific host
   python main.py --port 8080        # Run server on specific port
         """,
@@ -180,6 +228,11 @@ Examples:
         "--seed-ingredients",
         action="store_true",
         help="Seed database with canonical ingredients (run --init-db first)",
+    )
+    parser.add_argument(
+        "--seed-restrictions",
+        action="store_true",
+        help="Seed database with dietary restrictions (run --seed-ingredients first)",
     )
     parser.add_argument(
         "--host",
@@ -205,6 +258,8 @@ Examples:
         init_database()
     elif args.seed_ingredients:
         seed_ingredients()
+    elif args.seed_restrictions:
+        seed_dietary_restrictions()
     else:
         # Override config with CLI args
         if args.host:
