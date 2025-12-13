@@ -35,9 +35,8 @@ New ingredient: "{new_ingredient}"
 Top similar existing ingredients (with similarity scores):
 {candidates}
 
-Decision criteria:
-- MERGE if the new ingredient is essentially the same thing (just different wording, spelling, or minor variation)
-  - Examples: "fresh veggies" → "fresh vegetables", "beef meat" → "beef", "white onion" → "onion"
+**Strictly** follow decision criteria:
+- MERGE if the new ingredient is essentially the same thing (just different wording, spelling, or minor variation). Examples: "fresh veggies" → "fresh vegetables", "beef meat" → "beef", "white onion" → "onion"
   - THEN: Respond with ONLY a JSON object:
     {{
         "decision": "merge",
@@ -46,7 +45,7 @@ Decision criteria:
     }}
 - KEEP SEPARATE if:
  - Different parts of the plant/animal (e.g., "almond" vs "almond milk", "bone" vs "beef").
- - Different preparations that change the ingredient significantly (e.g., "dried basil" vs "fresh basil", "fresh vegetablse" vs "pickled vegetables")
+ - Different preparations that change the ingredient significantly (e.g., "dried basil" vs "fresh basil", "fresh vegetables" vs "pickled vegetables")
  - THEN: {{
         "decision": "new",
         "merge_into": null,
