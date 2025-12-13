@@ -7,6 +7,7 @@ Provides FastAPI application factory and CLI commands for:
 
 import argparse
 import logging
+import os
 import sys
 
 import uvicorn
