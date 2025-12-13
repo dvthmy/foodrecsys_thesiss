@@ -77,7 +77,7 @@ class Neo4jService:
             session.close()
 
     def create_constraints(self) -> list[str]:
-        """Create unique constraints for all entity types.
+        """Create unique constraints and vector index for all entity types.
 
         This should be called once during database initialization.
 
@@ -97,6 +97,19 @@ class Neo4jService:
             for name, query in constraints:
                 session.run(query)
                 created.append(name)
+
+            # Create vector index for ingredient embeddings (512 dimensions for CLIP)
+            vector_index_query = """
+            CREATE VECTOR INDEX ingredient_embeddings IF NOT EXISTS
+            FOR (i:Ingredient)
+            ON i.embedding
+            OPTIONS {indexConfig: {
+                `vector.dimensions`: 512,
+                `vector.similarity_function`: 'cosine'
+            }}
+            """
+            session.run(vector_index_query)
+            created.append("ingredient_embeddings_vector_index")
 
         return created
 
@@ -303,3 +316,237 @@ class Neo4jService:
         with self.session() as session:
             result = session.run(query)
             return [record["name"] for record in result]
+
+    # =========================================================================
+    # Ingredient Canonicalization Methods
+    # =========================================================================
+
+    def find_similar_ingredients(
+        self,
+        embedding: list[float],
+        k: int = 3,
+        threshold: float = 0.0,
+        canonical_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Find similar ingredients using vector similarity search.
+
+        Args:
+            embedding: The query embedding vector (512 dimensions for CLIP).
+            k: Number of nearest neighbors to return.
+            threshold: Minimum similarity score (0-1). Results below this are filtered.
+            canonical_only: If True, only search canonical ingredients.
+
+        Returns:
+            List of dictionaries with 'name' and 'score' keys, ordered by similarity.
+        """
+        if canonical_only:
+            query = """
+            CALL db.index.vector.queryNodes('ingredient_embeddings', $k, $embedding)
+            YIELD node AS ingredient, score
+            WHERE ingredient.is_canonical = true AND score >= $threshold
+            RETURN ingredient.name AS name, score
+            ORDER BY score DESC
+            """
+        else:
+            query = """
+            CALL db.index.vector.queryNodes('ingredient_embeddings', $k, $embedding)
+            YIELD node AS ingredient, score
+            WHERE score >= $threshold
+            RETURN ingredient.name AS name, score
+            ORDER BY score DESC
+            """
+
+        with self.session() as session:
+            result = session.run(query, embedding=embedding, k=k, threshold=threshold)
+            return [{"name": record["name"], "score": record["score"]} for record in result]
+
+    def create_canonical_ingredient(
+        self,
+        name: str,
+        embedding: list[float],
+    ) -> dict[str, Any]:
+        """Create a canonical ingredient with embedding.
+
+        Args:
+            name: Ingredient name (will be lowercased and trimmed).
+            embedding: CLIP embedding vector (512 dimensions).
+
+        Returns:
+            Dictionary with ingredient data.
+        """
+        query = """
+        MERGE (i:Ingredient {name: toLower(trim($name))})
+        ON CREATE SET
+            i.embedding = $embedding,
+            i.is_canonical = true,
+            i.created_at = datetime()
+        ON MATCH SET
+            i.embedding = $embedding,
+            i.is_canonical = true,
+            i.updated_at = datetime()
+        RETURN i.name AS name, i.is_canonical AS is_canonical
+        """
+
+        with self.session() as session:
+            result = session.run(query, name=name, embedding=embedding).single()
+            return dict(result) if result else {"name": name.lower().strip(), "is_canonical": True}
+
+    def create_pending_ingredient(
+        self,
+        name: str,
+        embedding: list[float],
+    ) -> dict[str, Any]:
+        """Create a pending (non-canonical) ingredient with embedding.
+
+        Args:
+            name: Ingredient name (will be lowercased and trimmed).
+            embedding: CLIP embedding vector (512 dimensions).
+
+        Returns:
+            Dictionary with ingredient data.
+        """
+        query = """
+        MERGE (i:Ingredient {name: toLower(trim($name))})
+        ON CREATE SET
+            i.embedding = $embedding,
+            i.is_canonical = false,
+            i.created_at = datetime()
+        ON MATCH SET
+            i.embedding = COALESCE(i.embedding, $embedding),
+            i.updated_at = datetime()
+        RETURN i.name AS name, i.is_canonical AS is_canonical
+        """
+
+        with self.session() as session:
+            result = session.run(query, name=name, embedding=embedding).single()
+            return dict(result) if result else {"name": name.lower().strip(), "is_canonical": False}
+
+    def approve_ingredient(self, name: str) -> dict[str, Any] | None:
+        """Approve a pending ingredient as canonical.
+
+        Args:
+            name: Ingredient name to approve.
+
+        Returns:
+            Dictionary with ingredient data, or None if not found.
+        """
+        query = """
+        MATCH (i:Ingredient {name: toLower(trim($name))})
+        SET i.is_canonical = true, i.approved_at = datetime()
+        RETURN i.name AS name, i.is_canonical AS is_canonical
+        """
+
+        with self.session() as session:
+            result = session.run(query, name=name).single()
+            return dict(result) if result else None
+
+    def reject_ingredient(self, name: str, merge_into: str) -> dict[str, Any] | None:
+        """Reject a pending ingredient and merge its relationships into another.
+
+        All dishes that CONTAIN the rejected ingredient will be updated
+        to CONTAIN the target ingredient instead. The rejected ingredient
+        is then deleted.
+
+        Args:
+            name: Ingredient name to reject and delete.
+            merge_into: Canonical ingredient to merge relationships into.
+
+        Returns:
+            Dictionary with merge result, or None if ingredients not found.
+        """
+        query = """
+        MATCH (rejected:Ingredient {name: toLower(trim($name))})
+        MATCH (target:Ingredient {name: toLower(trim($merge_into))})
+        
+        // Move all CONTAINS relationships from rejected to target
+        OPTIONAL MATCH (d:Dish)-[r:CONTAINS]->(rejected)
+        WITH rejected, target, collect(d) AS dishes
+        
+        // Create new relationships to target
+        UNWIND dishes AS dish
+        MERGE (dish)-[:CONTAINS]->(target)
+        
+        // Delete old relationships and rejected node
+        WITH rejected, target, count(dishes) AS merged_count
+        DETACH DELETE rejected
+        
+        RETURN target.name AS merged_into, merged_count
+        """
+
+        with self.session() as session:
+            result = session.run(query, name=name, merge_into=merge_into).single()
+            return dict(result) if result else None
+
+    def get_pending_ingredients(self) -> list[dict[str, Any]]:
+        """Get all pending (non-canonical) ingredients.
+
+        Returns:
+            List of pending ingredient dictionaries with name and creation time.
+        """
+        query = """
+        MATCH (i:Ingredient)
+        WHERE i.is_canonical = false OR i.is_canonical IS NULL
+        OPTIONAL MATCH (d:Dish)-[:CONTAINS]->(i)
+        RETURN i.name AS name, 
+               i.created_at AS created_at,
+               count(d) AS dish_count
+        ORDER BY i.created_at DESC
+        """
+
+        with self.session() as session:
+            result = session.run(query)
+            return [dict(record) for record in result]
+
+    def get_ingredient(self, name: str) -> dict[str, Any] | None:
+        """Get an ingredient by name.
+
+        Args:
+            name: Ingredient name.
+
+        Returns:
+            Dictionary with ingredient data, or None if not found.
+        """
+        query = """
+        MATCH (i:Ingredient {name: toLower(trim($name))})
+        OPTIONAL MATCH (d:Dish)-[:CONTAINS]->(i)
+        RETURN i.name AS name,
+               i.is_canonical AS is_canonical,
+               i.created_at AS created_at,
+               count(d) AS dish_count
+        """
+
+        with self.session() as session:
+            result = session.run(query, name=name).single()
+            return dict(result) if result else None
+
+    def batch_create_canonical_ingredients(
+        self,
+        ingredients: list[dict[str, Any]],
+    ) -> int:
+        """Batch create canonical ingredients with embeddings.
+
+        More efficient than individual creates for seeding.
+
+        Args:
+            ingredients: List of dicts with 'name' and 'embedding' keys.
+
+        Returns:
+            Number of ingredients created/updated.
+        """
+        query = """
+        UNWIND $ingredients AS ing
+        MERGE (i:Ingredient {name: toLower(trim(ing.name))})
+        ON CREATE SET
+            i.embedding = ing.embedding,
+            i.is_canonical = true,
+            i.created_at = datetime()
+        ON MATCH SET
+            i.embedding = ing.embedding,
+            i.is_canonical = true,
+            i.updated_at = datetime()
+        RETURN count(i) AS count
+        """
+
+        with self.session() as session:
+            result = session.run(query, ingredients=ingredients).single()
+            return result["count"] if result else 0

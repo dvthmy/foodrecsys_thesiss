@@ -105,6 +105,42 @@ class IngredientsResponse(BaseModel):
     count: int
 
 
+class PendingIngredient(BaseModel):
+    """A pending ingredient awaiting approval."""
+
+    name: str
+    created_at: str | None = None
+    dish_count: int = 0
+
+
+class PendingIngredientsResponse(BaseModel):
+    """Response from pending ingredients endpoint."""
+
+    pending: list[PendingIngredient]
+    count: int
+
+
+class ApproveIngredientRequest(BaseModel):
+    """Request to approve a pending ingredient."""
+
+    pass  # No body needed, name comes from path
+
+
+class RejectIngredientRequest(BaseModel):
+    """Request to reject a pending ingredient and merge into another."""
+
+    merge_into: str = Field(description="Canonical ingredient to merge relationships into")
+
+
+class IngredientActionResponse(BaseModel):
+    """Response from ingredient approval/rejection."""
+
+    success: bool
+    name: str
+    action: str
+    message: str
+
+
 def allowed_file(filename: str) -> bool:
     """Check if file extension is allowed.
 
@@ -328,3 +364,106 @@ async def get_all_ingredients() -> IngredientsResponse:
     ingredients = processor.neo4j.get_all_ingredients()
 
     return IngredientsResponse(ingredients=ingredients, count=len(ingredients))
+
+
+# =========================================================================
+# Admin Endpoints for Ingredient Canonicalization
+# =========================================================================
+
+
+@router.get("/ingredients/pending", response_model=PendingIngredientsResponse)
+async def get_pending_ingredients() -> PendingIngredientsResponse:
+    """Get all pending (non-canonical) ingredients awaiting approval.
+
+    Returns:
+        List of pending ingredients with metadata.
+    """
+    processor = get_processor()
+    pending = processor.neo4j.get_pending_ingredients()
+
+    pending_list = [
+        PendingIngredient(
+            name=p["name"],
+            created_at=str(p.get("created_at")) if p.get("created_at") else None,
+            dish_count=p.get("dish_count", 0),
+        )
+        for p in pending
+    ]
+
+    return PendingIngredientsResponse(pending=pending_list, count=len(pending_list))
+
+
+@router.post(
+    "/ingredients/{name}/approve",
+    response_model=IngredientActionResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+async def approve_ingredient(name: str) -> IngredientActionResponse:
+    """Approve a pending ingredient as canonical.
+
+    This marks the ingredient as canonical, making it available
+    for matching in the canonicalization pipeline.
+
+    Args:
+        name: The ingredient name to approve.
+
+    Returns:
+        Success confirmation.
+    """
+    processor = get_processor()
+    result = processor.neo4j.approve_ingredient(name)
+
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": f"Ingredient '{name}' not found", "code": "INGREDIENT_NOT_FOUND"},
+        )
+
+    return IngredientActionResponse(
+        success=True,
+        name=result["name"],
+        action="approved",
+        message=f"Ingredient '{result['name']}' is now canonical",
+    )
+
+
+@router.post(
+    "/ingredients/{name}/reject",
+    response_model=IngredientActionResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+async def reject_ingredient(
+    name: str,
+    request: RejectIngredientRequest,
+) -> IngredientActionResponse:
+    """Reject a pending ingredient and merge its relationships into another.
+
+    All dishes that contain the rejected ingredient will be updated
+    to contain the target canonical ingredient instead. The rejected
+    ingredient is then deleted.
+
+    Args:
+        name: The ingredient name to reject.
+        request: Contains the canonical ingredient to merge into.
+
+    Returns:
+        Success confirmation with merge details.
+    """
+    processor = get_processor()
+    result = processor.neo4j.reject_ingredient(name, request.merge_into)
+
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": f"Ingredient '{name}' or '{request.merge_into}' not found",
+                "code": "INGREDIENT_NOT_FOUND",
+            },
+        )
+
+    return IngredientActionResponse(
+        success=True,
+        name=name,
+        action="rejected",
+        message=f"Ingredient '{name}' merged into '{result['merged_into']}' ({result['merged_count']} dishes updated)",
+    )

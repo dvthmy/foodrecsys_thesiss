@@ -20,6 +20,7 @@ from src.services.gemini_extractor import GeminiExtractor
 from src.services.gemma_extractor import GemmaExtractor, get_gemma_extractor
 from src.services.neo4j_service import Neo4jService
 from src.services.clip_embedder import CLIPEmbedder, get_clip_embedder
+from src.services.ingredient_canonicalizer import IngredientCanonicalizer, get_canonicalizer
 
 class ProcessingStatus(Enum):
     """Status of a batch processing job."""
@@ -110,6 +111,7 @@ class BatchProcessor:
         extractor: GemmaExtractor | None = None,
         clip_embedder: CLIPEmbedder | None = None,
         neo4j_service: Neo4jService | None = None,
+        canonicalizer: IngredientCanonicalizer | None = None,
         max_workers: int | None = None,
     ):
         """Initialize the batch processor.
@@ -118,11 +120,13 @@ class BatchProcessor:
             extractor: Gemma extractor service instance.
             clip_embedder: CLIP embedder service instance.
             neo4j_service: Neo4j service instance.
+            canonicalizer: Ingredient canonicalizer service instance.
             max_workers: Maximum concurrent workers. Defaults to config value.
         """
         self._gemini = extractor
         self._clip = clip_embedder
         self._neo4j = neo4j_service
+        self._canonicalizer = canonicalizer
         self._max_workers = max_workers or config.MAX_WORKERS
 
         # Job storage with thread-safe access
@@ -149,6 +153,13 @@ class BatchProcessor:
         if self._neo4j is None:
             self._neo4j = Neo4jService()
         return self._neo4j
+
+    @property
+    def canonicalizer(self) -> IngredientCanonicalizer:
+        """Get or create Ingredient Canonicalizer instance."""
+        if self._canonicalizer is None:
+            self._canonicalizer = get_canonicalizer()
+        return self._canonicalizer
 
     def get_job(self, job_id: str) -> BatchJob | None:
         """Get a job by ID.
@@ -202,6 +213,24 @@ class BatchProcessor:
 
             # Step 2: Generate image embedding using CLIP
             image_embedding = self.clip.embed_image(temp_path)
+
+            # Step 3: Canonicalize each ingredient
+            # Process ingredients one-by-one for accuracy
+            canonical_ingredients = []
+            for ingredient in ingredients:
+                logging.info("Canonicalizing ingredient: %s", ingredient)
+                result = self.canonicalizer.canonicalize(ingredient)
+                canonical_name = result["canonical_name"]
+                logging.info(
+                    "  -> %s (action=%s, score=%.4f)",
+                    canonical_name,
+                    result["action"],
+                    result.get("score", 0.0),
+                )
+                canonical_ingredients.append(canonical_name)
+
+            # Use canonical ingredients for storage
+            ingredients = canonical_ingredients
 
             # Generate dish_id
             dish_id = str(uuid.uuid4())
@@ -291,7 +320,8 @@ class BatchProcessor:
                     if result.success:
                         job.completed += 1
                         # Delete temp file on success
-                        self._cleanup_temp_file(result.temp_path)
+                        if result.temp_path:
+                            self._cleanup_temp_file(result.temp_path)
                     else:
                         job.failed += 1
                         # Keep temp file on failure for debugging/retry

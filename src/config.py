@@ -37,6 +37,11 @@ class Config:
     # Batch Processing Configuration
     MAX_WORKERS: int = 5
 
+    # Ingredient Canonicalization Configuration
+    SIMILARITY_THRESHOLD_HIGH: float = float(os.getenv("SIMILARITY_THRESHOLD_HIGH", "0.98"))
+    SIMILARITY_THRESHOLD_LOW: float = float(os.getenv("SIMILARITY_THRESHOLD_LOW", "0.94"))
+    CANONICAL_TOP_K: int = int(os.getenv("CANONICAL_TOP_K", "3"))
+
     @classmethod
     def validate(cls) -> list[str]:
         """Validate that all required configuration is present.

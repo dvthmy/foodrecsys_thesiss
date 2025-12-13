@@ -84,7 +84,7 @@ def init_database() -> None:
         print("Connected to Neo4j successfully!")
 
         constraints = neo4j.create_constraints()
-        print(f"Created {len(constraints)} constraints:")
+        print(f"Created {len(constraints)} constraints/indexes:")
         for name in constraints:
             print(f"  - {name}")
 
@@ -93,6 +93,45 @@ def init_database() -> None:
 
     except Exception as e:
         print(f"Error initializing database: {e}")
+        sys.exit(1)
+
+
+def seed_ingredients() -> None:
+    """Seed the database with canonical ingredients."""
+    from src.data.canonical_ingredients import CANONICAL_INGREDIENTS
+    from src.services.clip_embedder import get_clip_embedder
+
+    print("Seeding canonical ingredients...")
+    print(f"Found {len(CANONICAL_INGREDIENTS)} ingredients to seed")
+
+    try:
+        neo4j = Neo4jService()
+        neo4j.verify_connectivity()
+        print("Connected to Neo4j successfully!")
+
+        clip = get_clip_embedder()
+        print("CLIP embedder loaded")
+
+        # Generate embeddings for all ingredients
+        ingredients_with_embeddings = []
+        for i, name in enumerate(CANONICAL_INGREDIENTS):
+            print(f"  [{i+1}/{len(CANONICAL_INGREDIENTS)}] Embedding: {name}")
+            embedding = clip.embed_text(name)
+            ingredients_with_embeddings.append({
+                "name": name,
+                "embedding": embedding,
+            })
+
+        # Batch insert into Neo4j
+        print("\nInserting into Neo4j...")
+        count = neo4j.batch_create_canonical_ingredients(ingredients_with_embeddings)
+        print(f"Created/updated {count} canonical ingredients")
+
+        neo4j.close()
+        print("Seeding complete!")
+
+    except Exception as e:
+        print(f"Error seeding ingredients: {e}")
         sys.exit(1)
 
 
@@ -125,6 +164,7 @@ def main() -> None:
 Examples:
   python main.py                    # Run the API server
   python main.py --init-db          # Initialize database constraints
+  python main.py --seed-ingredients # Seed canonical ingredients
   python main.py --host 0.0.0.0     # Run server on specific host
   python main.py --port 8080        # Run server on specific port
         """,
@@ -134,6 +174,11 @@ Examples:
         "--init-db",
         action="store_true",
         help="Initialize Neo4j database with constraints",
+    )
+    parser.add_argument(
+        "--seed-ingredients",
+        action="store_true",
+        help="Seed database with canonical ingredients (run --init-db first)",
     )
     parser.add_argument(
         "--host",
@@ -157,6 +202,8 @@ Examples:
 
     if args.init_db:
         init_database()
+    elif args.seed_ingredients:
+        seed_ingredients()
     else:
         # Override config with CLI args
         if args.host:
