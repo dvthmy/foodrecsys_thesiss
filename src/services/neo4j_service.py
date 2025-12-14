@@ -401,30 +401,52 @@ class Neo4jService:
         self,
         name: str,
         embedding: list[float],
+        confidence: str = "low",
+        suggested_merges: list[dict[str, Any]] | None = None,
+        best_score: float | None = None,
     ) -> dict[str, Any]:
         """Create a pending (non-canonical) ingredient with embedding.
 
         Args:
             name: Ingredient name (will be lowercased and trimmed).
             embedding: CLIP embedding vector (512 dimensions).
+            confidence: Pending confidence label (e.g., "medium", "low").
+            suggested_merges: Suggested canonical merge candidates (top-k), each item should contain at least 'name' and optionally 'score'.
+            best_score: Best similarity score observed (if available).
 
         Returns:
             Dictionary with ingredient data.
         """
+        if suggested_merges is None:
+            suggested_merges = []
+
         query = """
         MERGE (i:Ingredient {name: toLower(trim($name))})
         ON CREATE SET
             i.embedding = $embedding,
             i.is_canonical = false,
+            i.pending_confidence = $confidence,
+            i.suggested_merges = $suggested_merges,
+            i.pending_best_score = $best_score,
             i.created_at = datetime()
         ON MATCH SET
             i.embedding = COALESCE(i.embedding, $embedding),
+            i.pending_confidence = $confidence,
+            i.suggested_merges = $suggested_merges,
+            i.pending_best_score = $best_score,
             i.updated_at = datetime()
         RETURN i.name AS name, i.is_canonical AS is_canonical
         """
 
         with self.session() as session:
-            result = session.run(query, name=name, embedding=embedding).single()
+            result = session.run(
+                query,
+                name=name,
+                embedding=embedding,
+                confidence=confidence,
+                suggested_merges=suggested_merges,
+                best_score=best_score,
+            ).single()
             return dict(result) if result else {"name": name.lower().strip(), "is_canonical": False}
 
     def approve_ingredient(self, name: str) -> dict[str, Any] | None:
@@ -495,6 +517,9 @@ class Neo4jService:
         OPTIONAL MATCH (d:Dish)-[:CONTAINS]->(i)
         RETURN i.name AS name, 
                i.created_at AS created_at,
+             i.pending_confidence AS pending_confidence,
+             i.pending_best_score AS pending_best_score,
+             i.suggested_merges AS suggested_merges,
                count(d) AS dish_count
         ORDER BY i.created_at DESC
         """
@@ -518,6 +543,9 @@ class Neo4jService:
         RETURN i.name AS name,
                i.is_canonical AS is_canonical,
                i.created_at AS created_at,
+             i.pending_confidence AS pending_confidence,
+             i.pending_best_score AS pending_best_score,
+             i.suggested_merges AS suggested_merges,
                count(d) AS dish_count
         """
 

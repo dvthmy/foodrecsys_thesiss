@@ -22,6 +22,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import requests
 from urllib.parse import quote
+from difflib import SequenceMatcher
 from matplotlib.figure import Figure
 
 from src.services.neo4j_service import Neo4jService
@@ -59,9 +60,27 @@ def api_get_all_ingredients(api_base_url: str) -> list[str]:
     return payload.get("ingredients", [])
 
 
-def api_approve_ingredient(api_base_url: str, name: str) -> dict:
+@st.cache_data(ttl=300)
+def api_get_dietary_restrictions(api_base_url: str) -> list[dict]:
+    """Fetch dietary restrictions via FastAPI."""
+    resp = requests.get(f"{api_base_url.rstrip('/')}/dietary-restrictions", timeout=20)
+    resp.raise_for_status()
+    payload = resp.json()
+    return payload.get("restrictions", [])
+
+
+def api_approve_ingredient(
+    api_base_url: str,
+    name: str,
+    suited_for: list[str] | None = None,
+    not_suited_for: list[str] | None = None,
+) -> dict:
     resp = requests.post(
         f"{api_base_url.rstrip('/')}/ingredients/{quote(name)}/approve",
+        json={
+            "suited_for": suited_for or [],
+            "not_suited_for": not_suited_for or [],
+        },
         timeout=30,
     )
     resp.raise_for_status()
@@ -124,8 +143,16 @@ def render_pending_ingredients_page() -> None:
         st.error(f"Failed to fetch ingredient list for merge lookup: {e}")
         return
 
+    try:
+        restrictions_payload = api_get_dietary_restrictions(api_base_url)
+        restriction_names = [r.get("name") for r in restrictions_payload if r.get("name")]
+    except Exception as e:
+        st.error(f"Failed to fetch dietary restrictions: {e}")
+        return
+
     st.sidebar.markdown(f"**Pending:** {len(pending)}")
     st.sidebar.markdown(f"**All ingredients:** {len(all_ingredients)}")
+    st.sidebar.markdown(f"**Dietary restrictions:** {len(restriction_names)}")
 
     # Selection
     pending_names = [p.get("name", "") for p in pending if p.get("name")]
@@ -137,6 +164,9 @@ def render_pending_ingredients_page() -> None:
             "name": selected,
             "dish_count": selected_meta.get("dish_count", 0),
             "created_at": selected_meta.get("created_at"),
+            "pending_confidence": selected_meta.get("pending_confidence"),
+            "pending_best_score": selected_meta.get("pending_best_score"),
+            "suggested_merges": selected_meta.get("suggested_merges", []),
         }
     )
 
@@ -145,12 +175,27 @@ def render_pending_ingredients_page() -> None:
 
     with col1:
         st.subheader("Approve")
-        st.caption("Marks the ingredient as canonical.")
+        st.caption("Marks the ingredient as canonical and optionally links dietary restrictions.")
+
+        suited_for = st.multiselect(
+            "SUITED_FOR restrictions",
+            options=restriction_names,
+            default=[],
+            help="Select restrictions this ingredient is suitable for (creates SUITED_FOR relationships)",
+        )
+        not_suited_for = st.multiselect(
+            "NOT_SUITED_FOR restrictions",
+            options=restriction_names,
+            default=[],
+            help="Select restrictions this ingredient is NOT suitable for (creates NOT_SUITED_FOR relationships)",
+        )
+
         if st.button("Approve ingredient", type="primary"):
             try:
-                api_approve_ingredient(api_base_url, selected)
+                api_approve_ingredient(api_base_url, selected, suited_for, not_suited_for)
                 api_get_pending_ingredients.clear()
                 api_get_all_ingredients.clear()
+                api_get_dietary_restrictions.clear()
                 st.success(f"Approved '{selected}'")
                 st.rerun()
             except Exception as e:
@@ -162,7 +207,38 @@ def render_pending_ingredients_page() -> None:
 
         # Prevent selecting itself as target
         merge_options = [x for x in all_ingredients if x and x != selected]
-        merge_into = str(st.selectbox("Merge into", options=merge_options))
+
+        # Suggested target: prefer stored suggestions, otherwise fuzzy match by name
+        suggested_from_model = None
+        model_suggestions = selected_meta.get("suggested_merges", []) or []
+        if model_suggestions and isinstance(model_suggestions, list):
+            first = model_suggestions[0]
+            if isinstance(first, dict) and first.get("name"):
+                suggested_from_model = str(first.get("name"))
+
+        suggested_fuzzy = None
+        fuzzy_score = 0.0
+        if merge_options:
+            best = (None, 0.0)
+            for candidate in merge_options:
+                score = SequenceMatcher(None, selected.lower(), str(candidate).lower()).ratio()
+                if score > best[1]:
+                    best = (candidate, score)
+            suggested_fuzzy, fuzzy_score = best
+
+        suggested_target = suggested_from_model or suggested_fuzzy
+
+        if suggested_target:
+            if suggested_from_model:
+                st.caption(f"Suggested merge (from candidates): {suggested_target}")
+            else:
+                st.caption(f"Suggested merge (fuzzy): {suggested_target} (ratio={fuzzy_score:.2f})")
+
+        default_index = 0
+        if suggested_target and suggested_target in merge_options:
+            default_index = merge_options.index(suggested_target)
+
+        merge_into = str(st.selectbox("Merge into", options=merge_options, index=default_index))
 
         if st.button("Merge and delete pending", type="secondary"):
             try:

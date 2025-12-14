@@ -111,6 +111,18 @@ class PendingIngredient(BaseModel):
     name: str
     created_at: str | None = None
     dish_count: int = 0
+    pending_confidence: str | None = Field(
+        default=None,
+        description="Pending confidence label (e.g., 'medium', 'low')",
+    )
+    pending_best_score: float | None = Field(
+        default=None,
+        description="Best similarity score observed during canonicalization",
+    )
+    suggested_merges: list[dict] = Field(
+        default_factory=list,
+        description="Suggested canonical ingredients to merge into (top-k), each item typically contains 'name' and 'score'",
+    )
 
 
 class PendingIngredientsResponse(BaseModel):
@@ -123,7 +135,28 @@ class PendingIngredientsResponse(BaseModel):
 class ApproveIngredientRequest(BaseModel):
     """Request to approve a pending ingredient."""
 
-    pass  # No body needed, name comes from path
+    suited_for: list[str] = Field(
+        default_factory=list,
+        description="Dietary restrictions this ingredient is suited for (creates SUITED_FOR relationships)",
+    )
+    not_suited_for: list[str] = Field(
+        default_factory=list,
+        description="Dietary restrictions this ingredient is NOT suited for (creates NOT_SUITED_FOR relationships)",
+    )
+
+
+class DietaryRestrictionSummary(BaseModel):
+    """Summary model for dietary restrictions."""
+
+    name: str
+    description: str | None = None
+
+
+class DietaryRestrictionsResponse(BaseModel):
+    """Response from dietary restrictions endpoint."""
+
+    restrictions: list[DietaryRestrictionSummary]
+    count: int
 
 
 class RejectIngredientRequest(BaseModel):
@@ -523,6 +556,9 @@ async def get_pending_ingredients() -> PendingIngredientsResponse:
             name=p["name"],
             created_at=str(p.get("created_at")) if p.get("created_at") else None,
             dish_count=p.get("dish_count", 0),
+            pending_confidence=p.get("pending_confidence"),
+            pending_best_score=p.get("pending_best_score"),
+            suggested_merges=p.get("suggested_merges") or [],
         )
         for p in pending
     ]
@@ -535,7 +571,10 @@ async def get_pending_ingredients() -> PendingIngredientsResponse:
     response_model=IngredientActionResponse,
     responses={404: {"model": ErrorResponse}},
 )
-async def approve_ingredient(name: str) -> IngredientActionResponse:
+async def approve_ingredient(
+    name: str,
+    request: ApproveIngredientRequest | None = None,
+) -> IngredientActionResponse:
     """Approve a pending ingredient as canonical.
 
     This marks the ingredient as canonical, making it available
@@ -556,12 +595,67 @@ async def approve_ingredient(name: str) -> IngredientActionResponse:
             detail={"error": f"Ingredient '{name}' not found", "code": "INGREDIENT_NOT_FOUND"},
         )
 
+    suited_added = 0
+    not_suited_added = 0
+    missing_restrictions: list[str] = []
+
+    if request is not None:
+        for restriction in request.suited_for:
+            rel = processor.neo4j.create_ingredient_restriction_relationship(
+                ingredient_name=result["name"],
+                restriction_name=restriction,
+                relationship_type="SUITED_FOR",
+            )
+            if rel is None:
+                missing_restrictions.append(restriction)
+            else:
+                suited_added += 1
+
+        for restriction in request.not_suited_for:
+            rel = processor.neo4j.create_ingredient_restriction_relationship(
+                ingredient_name=result["name"],
+                restriction_name=restriction,
+                relationship_type="NOT_SUITED_FOR",
+            )
+            if rel is None:
+                missing_restrictions.append(restriction)
+            else:
+                not_suited_added += 1
+
+    msg = f"Ingredient '{result['name']}' is now canonical"
+    if request is not None:
+        msg += f"; restrictions linked (suited={suited_added}, not_suited={not_suited_added})"
+        if missing_restrictions:
+            msg += f"; missing restrictions skipped: {', '.join(sorted(set(missing_restrictions)))}"
+
     return IngredientActionResponse(
         success=True,
         name=result["name"],
         action="approved",
-        message=f"Ingredient '{result['name']}' is now canonical",
+        message=msg,
     )
+
+
+@router.get(
+    "/dietary-restrictions",
+    response_model=DietaryRestrictionsResponse,
+    tags=["dietary_restrictions"],
+)
+async def get_dietary_restrictions() -> DietaryRestrictionsResponse:
+    """Get all dietary restrictions.
+
+    Returns:
+        List of dietary restriction names and descriptions.
+    """
+    processor = get_processor()
+    restrictions = processor.neo4j.get_all_dietary_restrictions()
+
+    items = [
+        DietaryRestrictionSummary(name=r["name"], description=r.get("description"))
+        for r in restrictions
+    ]
+
+    return DietaryRestrictionsResponse(restrictions=items, count=len(items))
 
 
 @router.post(
