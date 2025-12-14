@@ -25,6 +25,7 @@ Represents an ingredient used in dishes.
 | Property | Type | Description |
 |----------|------|-------------|
 | `name` | String | Ingredient name (lowercase, trimmed) |
+| `embedding` | List[Float] | Embedding vector (512 dimensions) |
 | `created_at` | DateTime | When the ingredient was created |
 
 ### Country
@@ -71,10 +72,7 @@ Represents dietary restrictions (e.g., vegan, gluten-free).
 ### Planned for Recommendation System
 
 ```
-(User)-[:BOOKED]->(Dish)
-(User)-[:RATED {rating: 1-5, review: "..."}]->(Dish)
-(User)-[:PREFERS]->(Ingredient)
-(User)-[:AVOIDS]->(Ingredient)
+(User)-[:RATED {rating: 1-5}]->(Dish)
 (User)-[:FOLLOWS]->(DietaryRestriction)
 ```
 
