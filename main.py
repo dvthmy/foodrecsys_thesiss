@@ -113,17 +113,14 @@ def seed_ingredients() -> None:
         embedder = get_ingredient_embedder()
         print("EmbeddingGemma embedder loaded")
 
-        # Generate embeddings for all ingredients (document mode for storage)
+        # Generate embeddings for each ingredient individually (document mode for storage)
         print("\nGenerating embeddings...")
-        embeddings = embedder.embed_ingredients(
-            CANONICAL_INGREDIENTS,
-            mode="document",
-        )
-
-        ingredients_with_embeddings = [
-            {"name": name, "embedding": embedding}
-            for name, embedding in zip(CANONICAL_INGREDIENTS, embeddings)
-        ]
+        ingredients_with_embeddings = []
+        for i, name in enumerate(CANONICAL_INGREDIENTS):
+            embedding = embedder.embed_ingredient(name, mode="document")
+            ingredients_with_embeddings.append({"name": name, "embedding": embedding})
+            if (i + 1) % 10 == 0:
+                print(f"  Processed {i + 1}/{len(CANONICAL_INGREDIENTS)} ingredients")
 
         # Batch insert into Neo4j
         print("\nInserting into Neo4j...")

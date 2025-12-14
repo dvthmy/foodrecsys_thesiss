@@ -38,8 +38,8 @@ class Config:
     MAX_WORKERS: int = 5
 
     # Ingredient Canonicalization Configuration
-    SIMILARITY_THRESHOLD_HIGH: float = float(os.getenv("SIMILARITY_THRESHOLD_HIGH", "0.98"))
-    SIMILARITY_THRESHOLD_LOW: float = float(os.getenv("SIMILARITY_THRESHOLD_LOW", "0.94"))
+    SIMILARITY_THRESHOLD_HIGH: float = float(os.getenv("SIMILARITY_THRESHOLD_HIGH", "0.8"))
+    SIMILARITY_THRESHOLD_LOW: float = float(os.getenv("SIMILARITY_THRESHOLD_LOW", "0.6"))
     CANONICAL_TOP_K: int = int(os.getenv("CANONICAL_TOP_K", "3"))
 
     @classmethod

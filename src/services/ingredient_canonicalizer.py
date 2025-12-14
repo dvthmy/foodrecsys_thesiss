@@ -141,7 +141,7 @@ Top similar existing ingredients (with similarity scores):
         candidates = self.neo4j.find_similar_ingredients(
             embedding=embedding,
             k=self._top_k,
-            threshold=0.9,  # Get all to see what's available
+            threshold=0.3,  # Get all to see what's available
             canonical_only=True,
         )
 

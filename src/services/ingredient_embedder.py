@@ -167,7 +167,7 @@ class IngredientEmbedder:
             ingredient: str,
             mode: Literal["query", "document"] = "document",
             dish_name: str | None = None,
-            description: str | None = None,
+            description: str | None = "food ingredient",
         ) -> list[float]:
             """Generate embedding with correct prompting and truncation."""
             
@@ -192,11 +192,9 @@ class IngredientEmbedder:
                 # 1. Construct Content
                 if description:
                     content = description.lower().strip()
-                elif dish_name:
-                    content = f"food ingredient used in {dish_name.lower().strip()}"
                 else:
                     content = "food ingredient"
-
+                print(content)
                 # 2. Format with Official Template
                 # Result: "title: basil | text: a sweet herb..."
                 full_text = self.DOC_TEMPLATE.format(
@@ -210,73 +208,9 @@ class IngredientEmbedder:
                     prompt_name=None, 
                     truncate_dim=self._output_dim
                 )
-
-            # SentenceTransformers v3+ usually normalizes after truncation automatically 
-            # if normalize_embeddings=True is set, but manual normalization is safer 
-            # to ensure unit length for cosine similarity.
             embedding = np.asarray(embedding)
-            norm = np.linalg.norm(embedding)
-            if norm > 0:
-                embedding = embedding / norm
             
             return embedding.tolist()
-
-    def embed_ingredients(
-            self,
-            ingredients: list[str],
-            mode: Literal["query", "document"] = "document",
-            batch_size: int = 32,
-            dish_name: str | None = None,
-            descriptions: list[str] | None = None,
-        ) -> list[list[float]]:
-            
-            if not ingredients:
-                return []
-
-            if mode == "query":
-                # Pass RAW texts to encode_query
-                texts = [ing.lower().strip() for ing in ingredients]
-                embeddings = self.model.encode_query(
-                    texts,
-                    batch_size=batch_size,
-                    truncate_dim=self._output_dim,
-                    show_progress_bar=False
-                )
-            else:
-                # Manually format texts for documents
-                texts = []
-                for i, ing in enumerate(ingredients):
-                    desc = descriptions[i] if descriptions and i < len(descriptions) else None
-                    
-                    if desc:
-                        content = desc.lower().strip()
-                    elif dish_name:
-                        content = f"food ingredient used in {dish_name.lower().strip()}"
-                    else:
-                        content = "food ingredient"
-                    
-                    texts.append(self.DOC_TEMPLATE.format(
-                        title=ing.lower().strip(),
-                        text=content
-                    ))
-
-                # Use generic encode to avoid default document prompt overriding our titles
-                embeddings = self.model.encode(
-                    texts,
-                    batch_size=batch_size,
-                    prompt_name=None,
-                    truncate_dim=self._output_dim,
-                    show_progress_bar=False
-                )
-                
-            # Bulk Normalization
-            embeddings = np.asarray(embeddings)
-            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-            # Avoid division by zero
-            norms[norms == 0] = 1e-10
-            embeddings = embeddings / norms
-            
-            return embeddings.tolist()
     
     def compute_similarity(
         self,
