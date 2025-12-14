@@ -854,6 +854,27 @@ class Neo4jService:
             result = session.run(query, limit=limit)
             return [dict(record) for record in result]
 
+    def get_all_dishes_ingredients(self) -> list[dict[str, Any]]:
+        """Get all dishes with their ingredient names for IDF computation.
+
+        This is a lightweight query that only fetches ingredient names,
+        used for fitting TF-IDF weights across the entire dataset.
+
+        Returns:
+            List of dictionaries with dish_id and ingredients list.
+        """
+        query = """
+        MATCH (d:Dish)
+        OPTIONAL MATCH (d)-[:CONTAINS]->(i:Ingredient)
+        WITH d, collect(DISTINCT i.name) AS ingredient_names
+        RETURN d.dish_id AS dish_id,
+               ingredient_names AS ingredients
+        """
+
+        with self.session() as session:
+            result = session.run(query)
+            return [dict(record) for record in result]
+
     def get_dishes_with_embeddings_and_ingredients(
         self,
         dish_ids: list[str],

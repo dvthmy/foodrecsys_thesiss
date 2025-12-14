@@ -9,6 +9,9 @@ Implements three different similarity measures:
 import numpy as np
 from numpy.typing import NDArray
 
+from src.visualization.dish_aggregator import get_aggregator
+
+aggregator = get_aggregator(method='tfidf')
 
 def jaccard_similarity(set_a: set, set_b: set) -> float:
     """Compute Jaccard similarity between two sets.
@@ -82,14 +85,15 @@ def compute_jaccard_matrix(
 def compute_ingredient_embedding_matrix(
     dishes: list[dict],
 ) -> tuple[NDArray[np.float64], list[str], list[str]]:
-    """Compute pairwise cosine similarity based on averaged ingredient embeddings.
+    """Compute pairwise cosine similarity based on TF-IDF weighted ingredient embeddings.
 
-    For each dish, computes the average of all ingredient embeddings,
+    For each dish, computes the TF-IDF weighted aggregation of all ingredient embeddings,
     then calculates pairwise cosine similarity between dishes.
 
     Args:
         dishes: List of dish dictionaries with keys:
             - 'name': Dish name
+            - 'ingredients': List of ingredient names (list[str])
             - 'ingredient_embeddings': List of embedding vectors (list[list[float]])
 
     Returns:
@@ -103,14 +107,25 @@ def compute_ingredient_embedding_matrix(
 
     for dish in dishes:
         embeddings = dish.get("ingredient_embeddings", [])
-        # Filter out None or empty embeddings
-        valid_embeddings = [e for e in embeddings if e is not None and len(e) > 0]
+        ingredients = dish.get("ingredients", [])
+        
+        # Filter out None or empty embeddings, keeping aligned ingredient names
+        valid_embeddings = []
+        valid_ingredients = []
+        for i, e in enumerate(embeddings):
+            if e is not None and len(e) > 0:
+                valid_embeddings.append(e)
+                if i < len(ingredients):
+                    valid_ingredients.append(ingredients[i])
+                else:
+                    valid_ingredients.append(f"ingredient_{i}")
 
         if valid_embeddings:
-            avg_embedding = np.mean(valid_embeddings, axis=0)
+            # Use TF-IDF weighted aggregation instead of simple average
+            dish_embedding = aggregator.aggregate(valid_embeddings, valid_ingredients)
             valid_dishes.append({
                 "name": dish["name"],
-                "embedding": avg_embedding,
+                "embedding": np.array(dish_embedding, dtype=np.float64),
             })
         else:
             skipped_names.append(dish["name"])

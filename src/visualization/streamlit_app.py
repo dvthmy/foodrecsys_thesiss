@@ -20,8 +20,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import seaborn as sns
 import matplotlib.pyplot as plt
+import requests
+from urllib.parse import quote
+from matplotlib.figure import Figure
 
 from src.services.neo4j_service import Neo4jService
+from src.visualization.dish_aggregator import get_aggregator
 from src.visualization.similarity import (
     compute_jaccard_matrix,
     compute_ingredient_embedding_matrix,
@@ -37,6 +41,140 @@ st.set_page_config(
 )
 
 
+@st.cache_data(ttl=60)
+def api_get_pending_ingredients(api_base_url: str) -> list[dict]:
+    """Fetch pending ingredients via FastAPI."""
+    resp = requests.get(f"{api_base_url.rstrip('/')}/ingredients/pending", timeout=20)
+    resp.raise_for_status()
+    payload = resp.json()
+    return payload.get("pending", [])
+
+
+@st.cache_data(ttl=300)
+def api_get_all_ingredients(api_base_url: str) -> list[str]:
+    """Fetch all ingredients via FastAPI (used for merge lookup)."""
+    resp = requests.get(f"{api_base_url.rstrip('/')}/ingredients", timeout=20)
+    resp.raise_for_status()
+    payload = resp.json()
+    return payload.get("ingredients", [])
+
+
+def api_approve_ingredient(api_base_url: str, name: str) -> dict:
+    resp = requests.post(
+        f"{api_base_url.rstrip('/')}/ingredients/{quote(name)}/approve",
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def api_reject_and_merge_ingredient(api_base_url: str, name: str, merge_into: str) -> dict:
+    resp = requests.post(
+        f"{api_base_url.rstrip('/')}/ingredients/{quote(name)}/reject",
+        json={"merge_into": merge_into},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def render_pending_ingredients_page() -> None:
+    st.title("🧪 Pending Ingredients")
+    st.markdown("Review pending ingredients and either approve them or merge them into an existing ingredient.")
+
+    st.sidebar.subheader("API")
+    api_base_url = st.sidebar.text_input(
+        "FastAPI base URL",
+        value="http://localhost:8000/api/v1",
+        help="Example: http://localhost:8000/api/v1",
+    ).strip()
+
+    col_a, col_b = st.sidebar.columns(2)
+    with col_a:
+        refresh = st.button("Refresh", help="Reload pending and ingredient lists")
+    with col_b:
+        if st.button("Clear Cache"):
+            api_get_pending_ingredients.clear()
+            api_get_all_ingredients.clear()
+            st.rerun()
+
+    if refresh:
+        api_get_pending_ingredients.clear()
+        api_get_all_ingredients.clear()
+        st.rerun()
+
+    if not api_base_url:
+        st.error("Please enter a FastAPI base URL.")
+        return
+
+    # Load data via API
+    try:
+        pending = api_get_pending_ingredients(api_base_url)
+    except Exception as e:
+        st.error(f"Failed to fetch pending ingredients: {e}")
+        return
+
+    if not pending:
+        st.info("No pending ingredients.")
+        return
+
+    try:
+        all_ingredients = api_get_all_ingredients(api_base_url)
+    except Exception as e:
+        st.error(f"Failed to fetch ingredient list for merge lookup: {e}")
+        return
+
+    st.sidebar.markdown(f"**Pending:** {len(pending)}")
+    st.sidebar.markdown(f"**All ingredients:** {len(all_ingredients)}")
+
+    # Selection
+    pending_names = [p.get("name", "") for p in pending if p.get("name")]
+    selected = str(st.selectbox("Select a pending ingredient", options=pending_names))
+    selected_meta = next((p for p in pending if p.get("name") == selected), {})
+
+    st.write(
+        {
+            "name": selected,
+            "dish_count": selected_meta.get("dish_count", 0),
+            "created_at": selected_meta.get("created_at"),
+        }
+    )
+
+    st.divider()
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Approve")
+        st.caption("Marks the ingredient as canonical.")
+        if st.button("Approve ingredient", type="primary"):
+            try:
+                api_approve_ingredient(api_base_url, selected)
+                api_get_pending_ingredients.clear()
+                api_get_all_ingredients.clear()
+                st.success(f"Approved '{selected}'")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Approve failed: {e}")
+
+    with col2:
+        st.subheader("Merge")
+        st.caption("Merges dishes from this ingredient into an existing ingredient and deletes the pending one.")
+
+        # Prevent selecting itself as target
+        merge_options = [x for x in all_ingredients if x and x != selected]
+        merge_into = str(st.selectbox("Merge into", options=merge_options))
+
+        if st.button("Merge and delete pending", type="secondary"):
+            try:
+                api_reject_and_merge_ingredient(api_base_url, selected, merge_into)
+                api_get_pending_ingredients.clear()
+                api_get_all_ingredients.clear()
+                st.success(f"Merged '{selected}' → '{merge_into}'")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Merge failed: {e}")
+
+
 @st.cache_resource
 def get_neo4j_service() -> Neo4jService:
     """Get cached Neo4j service instance."""
@@ -49,6 +187,28 @@ def get_neo4j_service() -> Neo4jService:
 def fetch_dishes_summary(_service: Neo4jService, limit: int) -> list[dict]:
     """Fetch dish summary from Neo4j with caching."""
     return _service.get_dishes_summary(limit=limit)
+
+
+@st.cache_resource
+def fit_aggregator_idf(_service: Neo4jService) -> None:
+    """Fit the TF-IDF aggregator with all recipes from the database.
+    
+    This should be called once on app startup to compute IDF weights
+    for all ingredients across all dishes.
+    """
+    # Fetch all dishes with their ingredients
+    all_dishes = _service.get_all_dishes_ingredients()
+    
+    if not all_dishes:
+        st.warning("No dishes found for IDF fitting. Using default weights.")
+        return
+    
+    # Extract ingredient lists for each dish
+    all_recipes = [dish.get("ingredients", []) for dish in all_dishes]
+    
+    # Fit the aggregator
+    aggregator = get_aggregator(method='tfidf')
+    aggregator.fit_idf(all_recipes)
 
 
 @st.cache_data(ttl=300)
@@ -90,7 +250,7 @@ def render_seaborn_clustermap(
     matrix: np.ndarray,
     labels: list[str],
     title: str,
-) -> plt.Figure:
+) -> Figure:
     """Render a hierarchical clustermap using seaborn."""
     # Create clustermap with hierarchical clustering
     g = sns.clustermap(
@@ -122,10 +282,20 @@ def render_seaborn_clustermap(
 
 def main():
     """Main Streamlit application."""
-    st.title("🍽️ Dish Similarity Matrix")
-    st.markdown(
-        "Visualize pairwise similarity between dishes using different metrics."
+    # Sidebar navigation
+    st.sidebar.header("⚙️ Settings")
+    page = st.sidebar.radio(
+        "Page",
+        options=["Dish Similarity", "Pending Ingredients"],
+        index=0,
     )
+
+    if page == "Pending Ingredients":
+        render_pending_ingredients_page()
+        return
+
+    st.title("🍽️ Dish Similarity Matrix")
+    st.markdown("Visualize pairwise similarity between dishes using different metrics.")
 
     # Initialize Neo4j connection
     try:
@@ -135,8 +305,16 @@ def main():
         st.info("Make sure Neo4j is running and check your connection settings.")
         return
 
-    # Sidebar controls
-    st.sidebar.header("⚙️ Settings")
+    # Fit TF-IDF aggregator with all recipes (cached, runs once)
+    with st.spinner("Fitting TF-IDF weights..."):
+        fit_aggregator_idf(neo4j_service)
+
+    # Manual refit button (Similarity page only)
+    if st.sidebar.button("Refit TF-IDF weights", help="Recompute IDF from all dishes"):
+        with st.spinner("Recomputing TF-IDF weights..."):
+            fit_aggregator_idf.clear()
+            fit_aggregator_idf(neo4j_service)
+        st.sidebar.success("TF-IDF weights refreshed")
 
     # Max dishes limit
     max_dishes = st.sidebar.number_input(
