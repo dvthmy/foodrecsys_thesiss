@@ -4,9 +4,10 @@ Implements MERGE pattern to avoid duplicate nodes and handles
 concurrent writes with retry logic.
 """
 
+import json
 import time
 from contextlib import contextmanager
-from typing import Any, Generator
+from typing import Any, Generator, cast
 
 from neo4j import GraphDatabase, Driver, Session
 from neo4j.exceptions import TransientError, ServiceUnavailable
@@ -95,7 +96,7 @@ class Neo4jService:
         created = []
         with self.session() as session:
             for name, query in constraints:
-                session.run(query)
+                session.run(cast(Any, query))
                 created.append(name)
 
             # Create vector index for ingredient embeddings (512 dimensions)
@@ -103,7 +104,7 @@ class Neo4jService:
             drop_index_query = """
             DROP INDEX ingredient_embeddings IF EXISTS
             """
-            session.run(drop_index_query)
+            session.run(cast(Any, drop_index_query))
             
             vector_index_query = """
             CREATE VECTOR INDEX ingredient_embeddings IF NOT EXISTS
@@ -114,7 +115,7 @@ class Neo4jService:
                 `vector.similarity_function`: 'cosine'
             }}
             """
-            session.run(vector_index_query)
+            session.run(cast(Any, vector_index_query))
             created.append("ingredient_embeddings_vector_index")
 
         return created
@@ -420,6 +421,9 @@ class Neo4jService:
         if suggested_merges is None:
             suggested_merges = []
 
+        # Serialize suggested_merges to JSON string (Neo4j doesn't support arrays of maps)
+        suggested_merges_json = json.dumps(suggested_merges) if suggested_merges else None
+
         query = """
         MERGE (i:Ingredient {name: toLower(trim($name))})
         ON CREATE SET
@@ -444,7 +448,7 @@ class Neo4jService:
                 name=name,
                 embedding=embedding,
                 confidence=confidence,
-                suggested_merges=suggested_merges,
+                suggested_merges=suggested_merges_json,
                 best_score=best_score,
             ).single()
             return dict(result) if result else {"name": name.lower().strip(), "is_canonical": False}
@@ -517,16 +521,28 @@ class Neo4jService:
         OPTIONAL MATCH (d:Dish)-[:CONTAINS]->(i)
         RETURN i.name AS name, 
                i.created_at AS created_at,
-             i.pending_confidence AS pending_confidence,
-             i.pending_best_score AS pending_best_score,
-             i.suggested_merges AS suggested_merges,
+             i['pending_confidence'] AS pending_confidence,
+             i['pending_best_score'] AS pending_best_score,
+             i['suggested_merges'] AS suggested_merges,
                count(d) AS dish_count
         ORDER BY i.created_at DESC
         """
 
         with self.session() as session:
             result = session.run(query)
-            return [dict(record) for record in result]
+            records = []
+            for record in result:
+                data = dict(record)
+                # Deserialize suggested_merges from JSON string
+                if data.get("suggested_merges"):
+                    try:
+                        data["suggested_merges"] = json.loads(data["suggested_merges"])
+                    except (json.JSONDecodeError, TypeError):
+                        data["suggested_merges"] = []
+                else:
+                    data["suggested_merges"] = []
+                records.append(data)
+            return records
 
     def get_ingredient(self, name: str) -> dict[str, Any] | None:
         """Get an ingredient by name.
@@ -543,15 +559,26 @@ class Neo4jService:
         RETURN i.name AS name,
                i.is_canonical AS is_canonical,
                i.created_at AS created_at,
-             i.pending_confidence AS pending_confidence,
-             i.pending_best_score AS pending_best_score,
-             i.suggested_merges AS suggested_merges,
+             i['pending_confidence'] AS pending_confidence,
+             i['pending_best_score'] AS pending_best_score,
+             i['suggested_merges'] AS suggested_merges,
                count(d) AS dish_count
         """
 
         with self.session() as session:
             result = session.run(query, name=name).single()
-            return dict(result) if result else None
+            if result:
+                data = dict(result)
+                # Deserialize suggested_merges from JSON string
+                if data.get("suggested_merges"):
+                    try:
+                        data["suggested_merges"] = json.loads(data["suggested_merges"])
+                    except (json.JSONDecodeError, TypeError):
+                        data["suggested_merges"] = []
+                else:
+                    data["suggested_merges"] = []
+                return data
+            return None
 
     def batch_create_canonical_ingredients(
         self,
