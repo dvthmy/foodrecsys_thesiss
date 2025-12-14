@@ -1,11 +1,11 @@
 """Ingredient canonicalization service.
 
 Normalizes ingredient names by matching them against canonical ingredients
-using CLIP embeddings and semantic similarity. Uses Gemma LLM for ambiguous
-cases where similarity scores fall between high and low thresholds.
+using EmbeddingGemma embeddings and semantic similarity. Uses Gemma LLM for 
+ambiguous cases where similarity scores fall between high and low thresholds.
 
 Pipeline:
-1. Generate CLIP embedding for new ingredient
+1. Generate EmbeddingGemma embedding for new ingredient
 2. Query Neo4j vector index for top-k similar canonical ingredients
 3. Apply threshold logic:
    - score > high_threshold: Auto-map to existing canonical
@@ -17,7 +17,7 @@ import logging
 from typing import Any
 
 from src.config import config
-from src.services.clip_embedder import CLIPEmbedder, get_clip_embedder
+from src.services.ingredient_embedder import IngredientEmbedder, get_ingredient_embedder
 from src.services.gemma_extractor import GemmaExtractor, get_gemma_extractor
 from src.services.neo4j_service import Neo4jService
 
@@ -56,7 +56,7 @@ Top similar existing ingredients (with similarity scores):
     def __init__(
         self,
         neo4j: Neo4jService | None = None,
-        clip: CLIPEmbedder | None = None,
+        embedder: IngredientEmbedder | None = None,
         gemma: GemmaExtractor | None = None,
         high_threshold: float | None = None,
         low_threshold: float | None = None,
@@ -66,14 +66,14 @@ Top similar existing ingredients (with similarity scores):
 
         Args:
             neo4j: Neo4j service instance.
-            clip: CLIP embedder instance.
+            embedder: Ingredient embedder instance (EmbeddingGemma).
             gemma: Gemma extractor instance for LLM decisions.
             high_threshold: Score above which to auto-merge (default from config).
             low_threshold: Score below which to create as new (default from config).
             top_k: Number of candidates to retrieve (default from config).
         """
         self._neo4j = neo4j
-        self._clip = clip
+        self._embedder = embedder
         self._gemma = gemma
         self._high_threshold = high_threshold or config.SIMILARITY_THRESHOLD_HIGH
         self._low_threshold = low_threshold or config.SIMILARITY_THRESHOLD_LOW
@@ -87,11 +87,11 @@ Top similar existing ingredients (with similarity scores):
         return self._neo4j
 
     @property
-    def clip(self) -> CLIPEmbedder:
-        """Get or create CLIP embedder."""
-        if self._clip is None:
-            self._clip = get_clip_embedder()
-        return self._clip
+    def embedder(self) -> IngredientEmbedder:
+        """Get or create Ingredient embedder."""
+        if self._embedder is None:
+            self._embedder = get_ingredient_embedder()
+        return self._embedder
 
     @property
     def gemma(self) -> GemmaExtractor:
@@ -134,8 +134,8 @@ Top similar existing ingredients (with similarity scores):
                 "reason": "Exact match in database",
             }
 
-        # Step 2: Generate embedding
-        embedding = self.clip.embed_text(name)
+        # Step 2: Generate embedding using EmbeddingGemma (query mode for search)
+        embedding = self.embedder.embed_ingredient(name, mode="query")
 
         # Step 3: Find similar canonical ingredients
         candidates = self.neo4j.find_similar_ingredients(
@@ -148,7 +148,9 @@ Top similar existing ingredients (with similarity scores):
         # Handle cold start (no canonical ingredients yet)
         if not candidates:
             logger.info("No canonical ingredients found, creating '%s' as pending", name)
-            self.neo4j.create_pending_ingredient(name, embedding)
+            # Use document mode embedding for storage
+            storage_embedding = self.embedder.embed_ingredient(name, mode="document")
+            self.neo4j.create_pending_ingredient(name, storage_embedding)
             return {
                 "canonical_name": name,
                 "is_canonical": False,
@@ -200,7 +202,9 @@ Top similar existing ingredients (with similarity scores):
             else:
                 # LLM says keep separate, create as pending
                 logger.info("LLM decided '%s' is new: %s", name, decision.get("reason"))
-                self.neo4j.create_pending_ingredient(name, embedding)
+                # Use document mode embedding for storage
+                storage_embedding = self.embedder.embed_ingredient(name, mode="document")
+                self.neo4j.create_pending_ingredient(name, storage_embedding)
                 return {
                     "canonical_name": name,
                     "is_canonical": False,
@@ -213,7 +217,9 @@ Top similar existing ingredients (with similarity scores):
             # Low score: create as pending
             logger.info("Low match score for '%s' (%.4f < %.4f), creating as pending",
                        name, best_score, self._low_threshold)
-            self.neo4j.create_pending_ingredient(name, embedding)
+            # Use document mode embedding for storage
+            storage_embedding = self.embedder.embed_ingredient(name, mode="document")
+            self.neo4j.create_pending_ingredient(name, storage_embedding)
             return {
                 "canonical_name": name,
                 "is_canonical": False,

@@ -98,7 +98,13 @@ class Neo4jService:
                 session.run(query)
                 created.append(name)
 
-            # Create vector index for ingredient embeddings (512 dimensions for CLIP)
+            # Create vector index for ingredient embeddings (512 dimensions)
+            # Drop existing index if dimensions don't match
+            drop_index_query = """
+            DROP INDEX ingredient_embeddings IF EXISTS
+            """
+            session.run(drop_index_query)
+            
             vector_index_query = """
             CREATE VECTOR INDEX ingredient_embeddings IF NOT EXISTS
             FOR (i:Ingredient)
@@ -331,7 +337,7 @@ class Neo4jService:
         """Find similar ingredients using vector similarity search.
 
         Args:
-            embedding: The query embedding vector (512 dimensions for CLIP).
+            embedding: The query embedding vector (512 dimensions).
             k: Number of nearest neighbors to return.
             threshold: Minimum similarity score (0-1). Results below this are filtered.
             canonical_only: If True, only search canonical ingredients.

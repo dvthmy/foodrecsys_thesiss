@@ -100,7 +100,7 @@ def init_database() -> None:
 def seed_ingredients() -> None:
     """Seed the database with canonical ingredients."""
     from src.data.canonical_ingredients import CANONICAL_INGREDIENTS
-    from src.services.clip_embedder import get_clip_embedder
+    from src.services.ingredient_embedder import get_ingredient_embedder
 
     print("Seeding canonical ingredients...")
     print(f"Found {len(CANONICAL_INGREDIENTS)} ingredients to seed")
@@ -110,18 +110,20 @@ def seed_ingredients() -> None:
         neo4j.verify_connectivity()
         print("Connected to Neo4j successfully!")
 
-        clip = get_clip_embedder()
-        print("CLIP embedder loaded")
+        embedder = get_ingredient_embedder()
+        print("EmbeddingGemma embedder loaded")
 
-        # Generate embeddings for all ingredients
-        ingredients_with_embeddings = []
-        for i, name in enumerate(CANONICAL_INGREDIENTS):
-            print(f"  [{i+1}/{len(CANONICAL_INGREDIENTS)}] Embedding: {name}")
-            embedding = clip.embed_text(name)
-            ingredients_with_embeddings.append({
-                "name": name,
-                "embedding": embedding,
-            })
+        # Generate embeddings for all ingredients (document mode for storage)
+        print("\nGenerating embeddings...")
+        embeddings = embedder.embed_ingredients(
+            CANONICAL_INGREDIENTS,
+            mode="document",
+        )
+
+        ingredients_with_embeddings = [
+            {"name": name, "embedding": embedding}
+            for name, embedding in zip(CANONICAL_INGREDIENTS, embeddings)
+        ]
 
         # Batch insert into Neo4j
         print("\nInserting into Neo4j...")
