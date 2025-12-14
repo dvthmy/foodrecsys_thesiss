@@ -24,6 +24,7 @@ dependencies = [
     "seaborn>=0.13.0",
     "numpy>=1.26.0",
     "scipy>=1.14.0",
+    "sentence-transformers>=5.2.0",
 ]
 
 [project.scripts]

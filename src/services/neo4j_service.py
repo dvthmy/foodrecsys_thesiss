@@ -1171,3 +1171,281 @@ class Neo4jService:
         with self.session() as session:
             result = session.run(query, name=name).single()
             return dict(result) if result else None
+
+    # =========================================================================
+    # Collaborative Filtering Methods
+    # =========================================================================
+
+    def get_all_ratings(self) -> list[dict[str, Any]]:
+        """Get all user-dish ratings for building rating matrix.
+
+        Returns:
+            List of dictionaries with user_id, dish_id, dish_name, and score.
+        """
+        query = """
+        MATCH (u:User)-[r:RATED]->(d:Dish)
+        RETURN u.user_id AS user_id,
+               d.dish_id AS dish_id,
+               d.name AS dish_name,
+               r.score AS score
+        """
+
+        with self.session() as session:
+            result = session.run(query)
+            return [dict(record) for record in result]
+
+    def get_user_ratings(self, user_id: str) -> list[dict[str, Any]]:
+        """Get all ratings for a specific user.
+
+        Args:
+            user_id: The user identifier.
+
+        Returns:
+            List of dictionaries with dish_id, dish_name, and score.
+        """
+        query = """
+        MATCH (u:User {user_id: $user_id})-[r:RATED]->(d:Dish)
+        RETURN d.dish_id AS dish_id,
+               d.name AS dish_name,
+               r.score AS score
+        """
+
+        with self.session() as session:
+            result = session.run(query, user_id=user_id)
+            return [dict(record) for record in result]
+
+    def get_unrated_dishes_for_user(
+        self,
+        user_id: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Get dishes that a user hasn't rated yet.
+
+        Args:
+            user_id: The user identifier.
+            limit: Maximum number of dishes to return.
+
+        Returns:
+            List of dish dictionaries.
+        """
+        query = """
+        MATCH (d:Dish)
+        WHERE NOT EXISTS((u:User {user_id: $user_id})-[:RATED]->(d))
+        OPTIONAL MATCH (d)-[:CONTAINS]->(i:Ingredient)
+        WITH d, collect(DISTINCT i.name) AS ingredients
+        RETURN d.dish_id AS dish_id,
+               d.name AS name,
+               d.description AS description,
+               ingredients
+        LIMIT $limit
+        """
+
+        with self.session() as session:
+            result = session.run(query, user_id=user_id, limit=limit)
+            return [dict(record) for record in result]
+
+    def get_popular_dishes(
+        self,
+        limit: int = 10,
+        min_ratings: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Get most popular dishes based on average rating and rating count.
+
+        Args:
+            limit: Maximum number of dishes to return.
+            min_ratings: Minimum number of ratings required.
+
+        Returns:
+            List of dish dictionaries with avg_rating and rating_count.
+        """
+        query = """
+        MATCH (d:Dish)<-[r:RATED]-(:User)
+        WITH d, avg(r.score) AS avg_rating, count(r) AS rating_count
+        WHERE rating_count >= $min_ratings
+        OPTIONAL MATCH (d)-[:CONTAINS]->(i:Ingredient)
+        WITH d, avg_rating, rating_count, collect(DISTINCT i.name) AS ingredients
+        RETURN d.dish_id AS dish_id,
+               d.name AS name,
+               d.description AS description,
+               ingredients,
+               avg_rating,
+               rating_count
+        ORDER BY avg_rating DESC, rating_count DESC
+        LIMIT $limit
+        """
+
+        with self.session() as session:
+            result = session.run(query, limit=limit, min_ratings=min_ratings)
+            return [dict(record) for record in result]
+
+    def get_popular_dishes_with_restriction_filter(
+        self,
+        restriction_names: list[str],
+        limit: int = 10,
+        min_ratings: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Get popular dishes excluding those with ingredients not suited for restrictions.
+
+        Args:
+            restriction_names: List of dietary restriction names to filter by.
+            limit: Maximum number of dishes to return.
+            min_ratings: Minimum number of ratings required.
+
+        Returns:
+            List of dish dictionaries safe for the given restrictions.
+        """
+        if not restriction_names:
+            return self.get_popular_dishes(limit=limit, min_ratings=min_ratings)
+
+        query = """
+        // Get ingredients that are NOT suited for the user's restrictions
+        MATCH (bad_ing:Ingredient)-[:NOT_SUITED_FOR]->(r:DietaryRestriction)
+        WHERE r.name IN $restriction_names
+        WITH collect(DISTINCT bad_ing.name) AS bad_ingredients
+
+        // Find popular dishes that don't contain bad ingredients
+        MATCH (d:Dish)<-[rated:RATED]-(:User)
+        WITH d, avg(rated.score) AS avg_rating, count(rated) AS rating_count, bad_ingredients
+        WHERE rating_count >= $min_ratings
+
+        // Check dish ingredients
+        OPTIONAL MATCH (d)-[:CONTAINS]->(i:Ingredient)
+        WITH d, avg_rating, rating_count, 
+             collect(DISTINCT i.name) AS ingredients,
+             bad_ingredients
+
+        // Filter out dishes with bad ingredients
+        WHERE NONE(ing IN ingredients WHERE ing IN bad_ingredients)
+
+        RETURN d.dish_id AS dish_id,
+               d.name AS name,
+               d.description AS description,
+               ingredients,
+               avg_rating,
+               rating_count
+        ORDER BY avg_rating DESC, rating_count DESC
+        LIMIT $limit
+        """
+
+        with self.session() as session:
+            result = session.run(
+                query,
+                restriction_names=[r.lower().strip() for r in restriction_names],
+                limit=limit,
+                min_ratings=min_ratings,
+            )
+            return [dict(record) for record in result]
+
+    def get_dishes_rated_by_users(
+        self,
+        user_ids: list[str],
+        exclude_user_id: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Get dishes rated by specific users, excluding dishes already rated by target user.
+
+        Args:
+            user_ids: List of user IDs whose ratings to consider.
+            exclude_user_id: User ID to exclude (target user).
+            limit: Maximum number of dishes to return.
+
+        Returns:
+            List of dish dictionaries with aggregated ratings from similar users.
+        """
+        query = """
+        // Get dishes rated by target user to exclude
+        MATCH (target:User {user_id: $exclude_user_id})
+        OPTIONAL MATCH (target)-[:RATED]->(rated_dish:Dish)
+        WITH collect(rated_dish.dish_id) AS already_rated
+
+        // Get dishes rated by similar users
+        MATCH (u:User)-[r:RATED]->(d:Dish)
+        WHERE u.user_id IN $user_ids 
+          AND NOT d.dish_id IN already_rated
+        WITH d, 
+             avg(r.score) AS avg_score,
+             count(r) AS rater_count,
+             collect({user_id: u.user_id, score: r.score}) AS ratings
+
+        OPTIONAL MATCH (d)-[:CONTAINS]->(i:Ingredient)
+        WITH d, avg_score, rater_count, ratings, collect(DISTINCT i.name) AS ingredients
+
+        RETURN d.dish_id AS dish_id,
+               d.name AS name,
+               d.description AS description,
+               ingredients,
+               avg_score,
+               rater_count,
+               ratings
+        ORDER BY avg_score DESC, rater_count DESC
+        LIMIT $limit
+        """
+
+        with self.session() as session:
+            result = session.run(
+                query,
+                user_ids=user_ids,
+                exclude_user_id=exclude_user_id,
+                limit=limit,
+            )
+            return [dict(record) for record in result]
+
+    def get_user_dietary_restrictions(self, user_id: str) -> list[str]:
+        """Get dietary restrictions for a user.
+
+        Args:
+            user_id: The user identifier.
+
+        Returns:
+            List of restriction names.
+        """
+        query = """
+        MATCH (u:User {user_id: $user_id})-[:HAS_RESTRICTION]->(r:DietaryRestriction)
+        RETURN collect(r.name) AS restrictions
+        """
+
+        with self.session() as session:
+            result = session.run(query, user_id=user_id).single()
+            if result:
+                return result["restrictions"] or []
+            return []
+
+    def filter_dishes_by_restrictions(
+        self,
+        dish_ids: list[str],
+        restriction_names: list[str],
+    ) -> list[str]:
+        """Filter dish IDs to exclude those not suited for dietary restrictions.
+
+        Args:
+            dish_ids: List of dish IDs to filter.
+            restriction_names: List of dietary restriction names.
+
+        Returns:
+            Filtered list of dish IDs that are safe for the restrictions.
+        """
+        if not restriction_names or not dish_ids:
+            return dish_ids
+
+        query = """
+        // Get ingredients that are NOT suited for the restrictions
+        MATCH (bad_ing:Ingredient)-[:NOT_SUITED_FOR]->(r:DietaryRestriction)
+        WHERE r.name IN $restriction_names
+        WITH collect(DISTINCT bad_ing.name) AS bad_ingredients
+
+        // Check each dish
+        UNWIND $dish_ids AS did
+        MATCH (d:Dish {dish_id: did})
+        OPTIONAL MATCH (d)-[:CONTAINS]->(i:Ingredient)
+        WITH d, collect(DISTINCT i.name) AS ingredients, bad_ingredients
+        WHERE NONE(ing IN ingredients WHERE ing IN bad_ingredients)
+        RETURN d.dish_id AS dish_id
+        """
+
+        with self.session() as session:
+            result = session.run(
+                query,
+                dish_ids=dish_ids,
+                restriction_names=[r.lower().strip() for r in restriction_names],
+            )
+            return [record["dish_id"] for record in result]

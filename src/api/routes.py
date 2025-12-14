@@ -224,6 +224,61 @@ class UserIngestRequest(BaseModel):
     )
 
 
+# =========================================================================
+# Recommendation Models
+# =========================================================================
+
+
+class DishRecommendationResponse(BaseModel):
+    """A recommended dish with prediction details."""
+
+    dish_id: str
+    name: str
+    predicted_score: float = Field(description="Predicted rating score (1-5)")
+    description: str | None = None
+    ingredients: list[str] = Field(default_factory=list)
+    recommender_count: int = Field(
+        default=0,
+        description="Number of similar users who rated this dish",
+    )
+    reason: str = Field(
+        default="collaborative_filtering",
+        description="Reason for recommendation: 'collaborative_filtering' or 'popular_dish'",
+    )
+
+
+class SimilarUserResponse(BaseModel):
+    """A similar user with similarity score."""
+
+    user_id: str
+    name: str
+    similarity: float = Field(description="Cosine similarity score (0-1)")
+    shared_dishes: int = Field(
+        default=0,
+        description="Number of dishes both users have rated",
+    )
+
+
+class RecommendationsResponse(BaseModel):
+    """Response from recommendations endpoint."""
+
+    user_id: str
+    recommendations: list[DishRecommendationResponse]
+    count: int
+    method: str = Field(
+        description="Method used: 'collaborative_filtering' or 'popular_fallback'",
+    )
+
+
+class SimilarUsersResponse(BaseModel):
+    """Response from similar users endpoint."""
+
+    user_id: str
+    similar_users: list[SimilarUserResponse]
+    count: int
+    similarity_threshold: float
+
+
 def allowed_file(filename: str) -> bool:
     """Check if file extension is allowed.
 
@@ -426,7 +481,6 @@ async def get_dish(dish_id: str) -> dict:
     """
     processor = get_processor()
     dish = processor.neo4j.get_dish_by_id(dish_id)
-
     if dish is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
