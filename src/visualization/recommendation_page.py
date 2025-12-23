@@ -11,7 +11,7 @@ from typing import Any
 def api_get_users(api_base_url: str) -> list[dict]:
     """Fetch all users."""
     try:
-        resp = requests.get(f"{api_base_url.rstrip('/')}/users", params={"limit": 100}, timeout=10)
+        resp = requests.get(f"{api_base_url.rstrip('/')}/users", params={"limit": 1000}, timeout=10)
         resp.raise_for_status()
         return resp.json().get("users", [])
     except Exception as e:
@@ -89,7 +89,7 @@ def render_recommendations_page(api_base_url: str = "https://api.foodrecys.capte
     tab1, tab2 = st.tabs(["User Recommendations", "Image Search"])
     
     with tab1:
-        st.markdown("Compare **Collaborative Filtering** (User-based) vs **Content-Based Filtering** (Ingredient/Image-based).")
+        st.markdown("Compare **Collaborative Filtering** (User-based) vs **Content-Based Filtering** (Ingredient-based). For image-based recommendations, use the **Image Search** tab.")
 
         # User Selection
         users = api_get_users(api_base_url)
@@ -102,45 +102,74 @@ def render_recommendations_page(api_base_url: str = "https://api.foodrecys.capte
                 selected_user_label = st.selectbox("Select User", options=list(user_options.keys()))
             
             with col_metric:
-                metric_option = st.selectbox(
-                    "Similarity Metric",
-                    options=["Jaccard (Set Overlap)", "Embedding (Cosine)"],
-                    help="Jaccard uses set overlap (ingredients/ratings). Embedding uses vector cosine similarity."
+                method_option = st.selectbox(
+                    "Recommendation Method",
+                    options=["Content-Based (Ingredients)", "Collaborative Filtering"],
+                    help="Content-Based uses ingredient similarity. Collaborative uses similar users. (Image-based recommendations available in Image Search tab)"
                 )
-                # Map UI option to API param
-                metric_param = "jaccard" if "Jaccard" in metric_option else "embedding"
-                # For collaborative, 'embedding' maps to 'cosine' on user vectors
-                cf_metric = "jaccard" if metric_param == "jaccard" else "cosine"
-                # For content-based, 'embedding' maps to 'embedding' (image vectors), 'jaccard' maps to 'jaccard' (ingredients)
-                cb_metric = metric_param
+                
+                # Determine method and metric based on selection
+                if "Content-Based" in method_option:
+                    method_param = "content_based"
+                    metric_option = st.selectbox(
+                        "Content-Based Metric",
+                        options=["Jaccard (Set Overlap)", "Ingredient Embedding (Semantic)"],
+                        help="Jaccard uses ingredient set overlap. Ingredient Embedding uses Gemma semantic embeddings with TF-IDF weighting."
+                    )
+                    cb_metric = "jaccard" if "Jaccard" in metric_option else "ingredient_embedding"
+                    cf_metric = "cosine"  # Not used for content-based
+                else:
+                    method_param = "collaborative"
+                    metric_option = st.selectbox(
+                        "Collaborative Metric",
+                        options=["Cosine", "Jaccard"],
+                        help="Similarity metric for user vectors."
+                    )
+                    cf_metric = "cosine" if "Cosine" in metric_option else "jaccard"
+                    cb_metric = None  # Not used for collaborative
             
             if selected_user_label:
                 selected_user_id = user_options[selected_user_label]
                 
                 # Fetch Data
                 if st.button("Get Recommendations"):
-                    col_cf, col_cb = st.columns(2)
+                    if method_param == "content_based":
+                        # Content-Based Recommendations (Full Width)
+                        metric_name = "Jaccard (Set Overlap)" if cb_metric == "jaccard" else "Ingredient Embedding (Semantic)"
+                        st.header("🥘 Content-Based Recommendations")
+                        st.caption(f"Recommends dishes similar to what you like ({metric_name}).")
+                        
+                        with st.spinner("Fetching content-based recommendations..."):
+                            rec_data = api_get_recommendations(api_base_url, selected_user_id, "content_based", cb_metric)
+                        
+                        if rec_data:
+                            recs = rec_data.get("recommendations", [])
+                            if not recs:
+                                st.info("No recommendations found. Try rating more dishes.")
+                            else:
+                                for dish in recs:
+                                    render_recommendation_card(dish, "content_based")
                     
-                    # Collaborative Filtering Column
-                    with col_cf:
-                        st.header("Collaborative Filtering")
+                    else:
+                        # Collaborative Filtering (Full Width)
+                        st.header("👥 Collaborative Filtering")
                         st.caption(f"Recommends dishes liked by similar users ({cf_metric}).")
                         
-                        with st.spinner("Fetching CF recommendations..."):
-                            cf_data = api_get_recommendations(api_base_url, selected_user_id, "collaborative", cf_metric)
-                            
-                        if cf_data:
-                            method_used = cf_data.get("method")
+                        with st.spinner("Fetching collaborative filtering recommendations..."):
+                            rec_data = api_get_recommendations(api_base_url, selected_user_id, "collaborative", cf_metric)
+                        
+                        if rec_data:
+                            method_used = rec_data.get("method")
                             if "popular_fallback" in method_used:
                                 st.warning("⚠️ Not enough data for collaborative filtering. Showing popular dishes instead.")
                             
-                            recs = cf_data.get("recommendations", [])
+                            recs = rec_data.get("recommendations", [])
                             if not recs:
                                 st.info("No recommendations found.")
                             else:
                                 for dish in recs:
                                     render_recommendation_card(dish, "collaborative")
-                                    
+                            
                             # Show similar users
                             if "collaborative_filtering" in method_used:
                                 with st.expander("👥 Similar Users"):
@@ -153,22 +182,6 @@ def render_recommendations_page(api_base_url: str = "https://api.foodrecys.capte
                                             hide_index=True,
                                             use_container_width=True
                                         )
-
-                    # Content-Based Filtering Column
-                    with col_cb:
-                        st.header("Content-Based Filtering")
-                        st.caption(f"Recommends dishes similar to what you like ({cb_metric}).")
-                        
-                        with st.spinner("Fetching CB recommendations..."):
-                            cb_data = api_get_recommendations(api_base_url, selected_user_id, "content_based", cb_metric)
-                            
-                        if cb_data:
-                            recs = cb_data.get("recommendations", [])
-                            if not recs:
-                                st.info("No recommendations found. Try rating more dishes.")
-                            else:
-                                for dish in recs:
-                                    render_recommendation_card(dish, "content_based")
 
     with tab2:
         st.header("📷 Search by Image")

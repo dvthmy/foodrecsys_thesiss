@@ -34,6 +34,7 @@ from src.visualization.similarity import (
     compute_image_embedding_matrix,
 )
 from src.visualization.recommendation_page import render_recommendations_page
+from src.visualization.upload_page import render_upload_page
 
 
 # Page configuration
@@ -394,11 +395,14 @@ def main():
 
     page = st.sidebar.radio(
         "Page",
-        options=["Dish Similarity", "Pending Ingredients", "Dish Recommendations"],
+        options=["Dish Similarity", "Upload & Process", "Pending Ingredients", "Dish Recommendations"],
         index=0,
     )
 
-    if page == "Pending Ingredients":
+    if page == "Upload & Process":
+        render_upload_page(api_base_url)
+        return
+    elif page == "Pending Ingredients":
         render_pending_ingredients_page(api_base_url)
         return
     elif page == "Dish Recommendations":

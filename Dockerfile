@@ -1,5 +1,8 @@
 FROM python:3.13-slim
 
+# 1. Cài đặt uv (Lấy trực tiếp từ image chính chủ của Astral)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
 WORKDIR /app
 
 # Install system dependencies
@@ -10,21 +13,24 @@ RUN apt-get update && apt-get install -y \
 
 # Copy project files
 COPY pyproject.toml .
+# Copy thêm uv.lock nếu bạn muốn cài đặt chính xác version đã lock (Rất khuyến khích)
+COPY uv.lock . 
+
+# 2. Cài đặt bằng uv thay vì pip
+# --system: Cài vào python hệ thống của Docker (không cần tạo venv ảo)
+# --no-cache: Giảm dung lượng image (tùy chọn)
+RUN uv pip install --system --no-cache -e .
+
 COPY README.md .
 COPY src/ src/
 COPY main.py .
-# Copy data files just in case
 COPY *.csv .
 COPY *.json .
 
-# Prevent python from writing pyc files
 ENV PYTHONDONTWRITEBYTECODE=1
-# Keep stdout/stderr unbuffered
 ENV PYTHONUNBUFFERED=1
 
-# Create temp directory for uploads
 RUN mkdir -p /tmp/food-recsys/uploads
 
-# Expose ports
 EXPOSE 8000
 EXPOSE 8501

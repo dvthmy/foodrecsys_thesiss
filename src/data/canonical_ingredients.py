@@ -97,6 +97,7 @@ CANONICAL_INGREDIENTS: list[str] = [
     "sesame oil",
     "vegetable oil",
     "coconut oil",
+    "fat",
     
     # Seasonings & Spices
     "salt",
@@ -122,6 +123,7 @@ CANONICAL_INGREDIENTS: list[str] = [
     "cilantro",
     "mint",
     "dill",
+    "herbs",
     
     # Sauces & Condiments
     "ketchup",
@@ -151,6 +153,7 @@ CANONICAL_INGREDIENTS: list[str] = [
     "berries",
     "grapes",
     "avocado",
+    "papaya",
     
     # Baking
     "baking powder",

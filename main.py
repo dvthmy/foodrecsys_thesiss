@@ -40,7 +40,7 @@ def create_app() -> FastAPI:
     """
     app = FastAPI(
         title="Food Recommendation System",
-        description="API for extracting ingredients from dish images using Gemini AI",
+        description="API for extracting ingredients from dish images using Gemma 3",
         version="0.1.0",
     )
 
@@ -59,7 +59,7 @@ def create_app() -> FastAPI:
         return {
             "name": "Food Recommendation System",
             "version": "0.1.0",
-            "description": "API for extracting ingredients from dish images using Gemini AI",
+            "description": "API for extracting ingredients from dish images using Gemma 3",
             "docs": "/docs",
             "endpoints": {
                 "health": "/api/v1/health",

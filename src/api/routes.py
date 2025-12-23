@@ -2,11 +2,11 @@
 
 Provides endpoints for:
 - Batch image upload
-- Processing uploaded images (Gemini for description, CLIP for images)
+- Processing uploaded images (Gemma 3 for description, CLIP for images)
 - Checking job status
 
 Design:
-- Gemini API: Extracts ingredients from text descriptions only
+- Gemma 3: Extracts ingredients from text descriptions only
 - CLIP: Generates image embeddings for visual similarity search
 """
 
@@ -38,7 +38,7 @@ class ProcessItem(BaseModel):
     name: str | None = Field(default=None, description="Dish name")
     description: str | None = Field(
         default=None, 
-        description="Text description - required for ingredient extraction via Gemini"
+        description="Text description - required for ingredient extraction via Gemma 3"
     )
 
 
@@ -430,14 +430,14 @@ async def upload_and_process(
     Convenience endpoint that combines upload and process steps.
     
     Processing Flow:
-    1. Gemini API: Extracts ingredients from text descriptions
+    1. Gemma 3: Extracts ingredients from text descriptions
     2. CLIP: Generates image embeddings for visual similarity
     3. Neo4j: Stores dish with ingredients and embedding
 
     Args:
         images: One or more image files.
         names: Optional dish names matching image order.
-        descriptions: Descriptions matching image order (required for Gemini extraction).
+        descriptions: Descriptions matching image order (required for Gemma 3 extraction).
 
     Returns:
         Job ID for tracking progress.
@@ -930,11 +930,11 @@ async def ingest_users(
     response_model=UsersListResponse,
     tags=["users"],
 )
-async def get_all_users(limit: int = 100) -> UsersListResponse:
+async def get_all_users(limit: int = 1000) -> UsersListResponse:
     """Get all users from the database.
 
     Args:
-        limit: Maximum number of users to return (default 100).
+        limit: Maximum number of users to return (default 1000).
 
     Returns:
         List of users with their dietary restrictions and rating counts.
@@ -1018,8 +1018,13 @@ async def get_recommendations(
     Args:
         user_id: The user identifier.
         limit: Maximum number of recommendations.
-        method: Recommendation method ('collaborative' or 'content_based').
-        metric: Similarity metric ('cosine', 'jaccard', or 'embedding').
+        method: Recommendation method:
+            - 'collaborative': Collaborative filtering
+            - 'content_based': Content-based filtering (ingredients)
+            - 'image_based': Image-based recommendations (CLIP embeddings)
+        metric: Similarity metric:
+            - For 'collaborative': 'cosine' or 'jaccard'
+            - For 'content_based': 'jaccard' or 'ingredient_embedding'
 
     Returns:
         List of recommended dishes.
@@ -1035,16 +1040,18 @@ async def get_recommendations(
     rec_service = get_recommendation_service()
     
     if method == "content_based":
-        # For content-based, 'embedding' metric means using image embeddings
-        # 'jaccard' means using ingredient overlap
-        # 'cosine' is not strictly supported for ingredients unless we embed them, 
-        # but let's map 'cosine' to 'embedding' if user asks, or default to jaccard?
-        # Actually, let's stick to what we implemented: 'jaccard' or 'embedding'
-        if metric not in ["jaccard", "embedding"]:
+        # For content-based:
+        # - 'jaccard': Jaccard similarity on ingredient sets
+        # - 'ingredient_embedding': Semantic similarity using Gemma ingredient embeddings + TF-IDF aggregation
+        if metric not in ["jaccard", "ingredient_embedding"]:
             metric = "jaccard" # Default for content-based
             
         recs = rec_service.recommend_content_based(user_id=user_id, k=limit, metric=metric)
         method_used = f"content_based_{metric}"
+    elif method == "image_based":
+        # Image-based recommendations using CLIP image embeddings
+        recs = rec_service.recommend_image_by_image(user_id=user_id, k=limit)
+        method_used = "image_based"
     else:
         # For collaborative, 'cosine' or 'jaccard' on user vectors
         if metric not in ["cosine", "jaccard"]:

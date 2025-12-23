@@ -3,13 +3,12 @@ services:
     image: neo4j:5.26-community
     container_name: food-recsys-neo4j
     ports:
-      - "7474:7474"  # HTTP (Neo4j Browser)
-      - "7687:7687"  # Bolt protocol
+      - "7474:7474"
+      - "7687:7687"
     environment:
       - NEO4J_AUTH=neo4j/food-recsys-password
       - NEO4J_PLUGINS=["apoc"]
       - NEO4J_dbms_security_procedures_unrestricted=apoc.*
-      - NEO4J_dbms_security_procedures_allowlist=apoc.*
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
@@ -18,13 +17,13 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
     restart: unless-stopped
 
   api:
     build: .
     container_name: food-recsys-api
-    command: python -m uvicorn main:create_app --factory --host 0.0.0.0 --port 8000
+    # [HOT RELOAD]: Thêm --reload
+    command: python -m uvicorn main:create_app --factory --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
     environment:
@@ -33,19 +32,21 @@ services:
       - NEO4J_PASSWORD=food-recsys-password
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - HF_API_KEY=${HF_API_KEY}
-      - PYTHONPATH=/app/.venv/lib/python3.13/site-packages
     depends_on:
       neo4j:
         condition: service_healthy
     volumes:
-      - ./src:/app/src
-      - ./main.py:/app/main.py
-      - ./.venv:/app/.venv
+      # [HOT RELOAD]: Mount toàn bộ code vào container
+      - .:/app
+      # Tránh mount đè folder .venv hoặc __pycache__ của máy host vào container
+      - /app/.venv
+      - /app/__pycache__
 
   streamlit:
     build: .
     container_name: food-recsys-streamlit
-    command: python -m streamlit run src/visualization/streamlit_app.py --server.port 8501 --server.address 0.0.0.0
+    # [HOT RELOAD]: Streamlit mặc định đã watch file, thêm runOnSave cho chắc chắn
+    command: python -m streamlit run src/visualization/streamlit_app.py --server.port 8501 --server.address 0.0.0.0 --server.runOnSave true
     ports:
       - "8080:8501"
     environment:
@@ -53,7 +54,6 @@ services:
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=food-recsys-password
       - API_BASE_URL=http://api:8000/api/v1
-      - PYTHONPATH=/app/.venv/lib/python3.13/site-packages
     env_file:
       - .env
     depends_on:
@@ -62,8 +62,9 @@ services:
       neo4j:
         condition: service_healthy
     volumes:
-      - ./src:/app/src
-      - ./.venv:/app/.venv
+      # [HOT RELOAD]: Mount code để Streamlit thấy thay đổi
+      - .:/app
+      - /app/.venv
 
 volumes:
   neo4j_data:

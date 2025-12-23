@@ -15,9 +15,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
-
 from src.config import config
-from src.services.gemini_extractor import GeminiExtractor
 from src.services.gemma_extractor import GemmaExtractor, get_gemma_extractor
 from src.services.neo4j_service import Neo4jService
 from src.services.clip_embedder import CLIPEmbedder, get_clip_embedder
