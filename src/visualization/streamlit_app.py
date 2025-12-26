@@ -32,6 +32,8 @@ from src.visualization.similarity import (
     compute_jaccard_matrix,
     compute_ingredient_embedding_matrix,
     compute_image_embedding_matrix,
+    compute_ingredient_comparison,
+    get_tfidf_weights_for_dish,
 )
 from src.visualization.recommendation_page import render_recommendations_page
 from src.visualization.upload_page import render_upload_page
@@ -94,6 +96,16 @@ def api_reject_and_merge_ingredient(api_base_url: str, name: str, merge_into: st
     resp = requests.post(
         f"{api_base_url.rstrip('/')}/ingredients/{quote(name)}/reject",
         json={"merge_into": merge_into},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def api_delete_ingredient(api_base_url: str, name: str) -> dict:
+    """Delete an ingredient without merging."""
+    resp = requests.delete(
+        f"{api_base_url.rstrip('/')}/ingredients/{quote(name)}",
         timeout=30,
     )
     resp.raise_for_status()
@@ -165,12 +177,19 @@ def render_pending_ingredients_page(api_base_url: str) -> None:
             "suggested_merges": selected_meta.get("suggested_merges", []),
         }
     )
+    
+    # Show dishes containing this ingredient
+    dish_names = selected_meta.get("dish_names", [])
+    if dish_names:
+        with st.expander(f"Dishes containing this ingredient ({len(dish_names)})", expanded=False):
+            for dish_name in dish_names:
+                st.markdown(f"- {dish_name}")
 
     st.divider()
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.subheader("Approve")
+        st.subheader("✅ Approve")
         st.caption("Marks the ingredient as canonical and optionally links dietary restrictions.")
 
         suited_for = st.multiselect(
@@ -198,7 +217,7 @@ def render_pending_ingredients_page(api_base_url: str) -> None:
                 st.error(f"Approve failed: {e}")
 
     with col2:
-        st.subheader("Merge")
+        st.subheader("🔀 Merge")
         st.caption("Merges dishes from this ingredient into an existing ingredient and deletes the pending one.")
 
         # Prevent selecting itself as target
@@ -236,7 +255,7 @@ def render_pending_ingredients_page(api_base_url: str) -> None:
 
         merge_into = str(st.selectbox("Merge into", options=merge_options, index=default_index))
 
-        if st.button("Merge and delete pending", type="secondary"):
+        if st.button("Merge and delete", type="secondary"):
             try:
                 api_reject_and_merge_ingredient(api_base_url, selected, merge_into)
                 api_get_pending_ingredients.clear()
@@ -245,6 +264,26 @@ def render_pending_ingredients_page(api_base_url: str) -> None:
                 st.rerun()
             except Exception as e:
                 st.error(f"Merge failed: {e}")
+
+    with col3:
+        st.subheader("🗑️ Delete")
+        st.caption("Permanently deletes the ingredient without merging. Dishes will lose this ingredient.")
+
+        dish_count = selected_meta.get("dish_count", 0)
+        if dish_count > 0:
+            st.warning(f"⚠️ This will affect {dish_count} dish(es)!")
+
+        confirm_delete = st.checkbox("I confirm I want to delete this ingredient", key="confirm_delete")
+
+        if st.button("Delete ingredient", type="secondary", disabled=not confirm_delete):
+            try:
+                api_delete_ingredient(api_base_url, selected)
+                api_get_pending_ingredients.clear()
+                api_get_all_ingredients.clear()
+                st.success(f"Deleted '{selected}'")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Delete failed: {e}")
 
 
 @st.cache_resource
@@ -395,8 +434,8 @@ def main():
 
     page = st.sidebar.radio(
         "Page",
-        options=["Dish Similarity", "Upload & Process", "Pending Ingredients", "Dish Recommendations"],
-        index=0,
+        options=["Upload & Process", "Pending Ingredients", "Dish Recommendations", "Dish Similarity"],
+        index=3,
     )
 
     if page == "Upload & Process":
@@ -569,10 +608,15 @@ def main():
         if metric == "Jaccard (Ingredients)":
             matrix, labels = compute_jaccard_matrix(dishes)
             skipped = []
+            valid_dishes = dishes  # All dishes are valid for Jaccard
         elif metric == "Ingredient Embeddings":
             matrix, labels, skipped = compute_ingredient_embedding_matrix(dishes)
+            # Create mapping of dish names to dish data for valid dishes
+            valid_dishes = {d["name"]: d for d in dishes if d["name"] in labels}
         else:  # Image Embeddings
             matrix, labels, skipped = compute_image_embedding_matrix(dishes)
+            # Create mapping of dish names to dish data for valid dishes
+            valid_dishes = {d["name"]: d for d in dishes if d["name"] in labels}
 
     # Show warnings for skipped dishes
     if skipped:
@@ -627,12 +671,147 @@ def main():
                     "Dish A": labels[i],
                     "Dish B": labels[j],
                     "Similarity": matrix[i, j],
+                    "index_A": i,
+                    "index_B": j,
                 })
         import pandas as pd
 
         pairs_df = pd.DataFrame(pairs)
         pairs_df = pairs_df.sort_values("Similarity", ascending=False).head(20)
-        st.dataframe(pairs_df, use_container_width=True)
+        
+        # Display table
+        st.dataframe(
+            pairs_df[["Dish A", "Dish B", "Similarity"]],
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Display ingredient details for each pair
+        st.markdown("---")
+        st.subheader("Ingredient Details")
+        
+        # Determine metric name for comparison
+        metric_name = "jaccard" if metric == "Jaccard (Ingredients)" else "ingredient_embedding"
+        
+        # Use higher threshold for ingredient embedding to avoid false positives
+        # Ingredients with same generic description ("food ingredient") can have high similarity
+        # Threshold 0.85 helps filter out false matches like "chicken" vs "spices"
+        similarity_threshold = 0.85 if metric_name == "ingredient_embedding" else 0.7
+        
+        # Explain the metric difference
+        if metric_name == "ingredient_embedding":
+            st.info(
+                "ℹ️ **Note**: Ingredient Embedding similarity measures **semantic similarity** "
+            
+            )
+        
+        for idx, row in pairs_df.iterrows():
+            dish_A_name = row["Dish A"]
+            dish_B_name = row["Dish B"]
+            similarity_score = row["Similarity"]
+            
+            # Find dish data
+            if metric == "Jaccard (Ingredients)":
+                dish_A_data = next((d for d in dishes if d["name"] == dish_A_name), None)
+                dish_B_data = next((d for d in dishes if d["name"] == dish_B_name), None)
+            else:
+                # For embedding metrics, use the valid_dishes mapping
+                dish_A_data = valid_dishes.get(dish_A_name)
+                dish_B_data = valid_dishes.get(dish_B_name)
+            
+            if not dish_A_data or not dish_B_data:
+                continue
+            
+            # Create expander for each pair
+            with st.expander(
+                f"🔍 {dish_A_name} ↔ {dish_B_name} (Similarity: {similarity_score:.4f})",
+                expanded=False
+            ):
+                try:
+                    # Compute ingredient comparison
+                    comparison = compute_ingredient_comparison(
+                        dish_A=dish_A_data,
+                        dish_B=dish_B_data,
+                        metric=metric_name,
+                        neo4j_service=neo4j_service if metric_name == "ingredient_embedding" else None,
+                        similarity_threshold=similarity_threshold,
+                        overall_similarity=similarity_score,
+                    )
+                    
+                    # Display shared ingredients
+                    if comparison.get("shared_ingredients"):
+                        st.markdown("**📌 Shared Ingredients (Similarity = 1.0):**")
+                        shared_list = comparison["shared_ingredients"]
+                        st.markdown(f"• {', • '.join(shared_list)}")
+                        st.markdown("")
+                    
+                    # Display similar pairs (only for ingredient_embedding)
+                    if metric_name == "ingredient_embedding" and comparison.get("similar_pairs"):
+                        st.markdown("**🔗 Similar Ingredient Pairs:**")
+                        for pair in comparison["similar_pairs"]:
+                            st.markdown(
+                                f"• **{pair['ingredient_A']}** ↔ **{pair['ingredient_B']}** "
+                                f"(similarity: {pair['similarity']:.3f})"
+                            )
+                        st.markdown("")
+                    
+                    # Display unique ingredients
+                    if comparison.get("unique_to_A"):
+                        st.markdown(f"**📋 Unique to {dish_A_name}:**")
+                        unique_A_list = comparison["unique_to_A"]
+                        st.markdown(f"• {', • '.join(unique_A_list)}")
+                        st.markdown("")
+                    
+                    if comparison.get("unique_to_B"):
+                        st.markdown(f"**📋 Unique to {dish_B_name}:**")
+                        unique_B_list = comparison["unique_to_B"]
+                        st.markdown(f"• {', • '.join(unique_B_list)}")
+                        st.markdown("")
+                    
+                    # Display TF-IDF weights (only for ingredient_embedding metric)
+                    if metric_name == "ingredient_embedding":
+                        st.markdown("---")
+                        st.markdown("**📊 TF-IDF Weights (Why similarity is high):**")
+                        st.caption(
+                            "TF-IDF weights show which ingredients contribute most to dish similarity. "
+                            "Higher weights = rarer ingredients that have more impact on the dish embedding."
+                        )
+                        
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.markdown(f"**{dish_A_name}:**")
+                            tfidf_A = get_tfidf_weights_for_dish(dish_A_data.get("ingredients", []))
+                            if tfidf_A:
+                                # Show top 10 ingredients by TF-IDF weight
+                                for item in tfidf_A[:10]:
+                                    st.caption(f"• {item['ingredient']}: {item['tfidf_weight']:.3f}")
+                        
+                        with col2:
+                            st.markdown(f"**{dish_B_name}:**")
+                            tfidf_B = get_tfidf_weights_for_dish(dish_B_data.get("ingredients", []))
+                            if tfidf_B:
+                                # Show top 10 ingredients by TF-IDF weight
+                                for item in tfidf_B[:10]:
+                                    st.caption(f"• {item['ingredient']}: {item['tfidf_weight']:.3f}")
+                        
+                        
+                    
+                    # Display overall similarity with explanation
+                    if comparison.get("overall_similarity") is not None:
+                        overall_sim = comparison['overall_similarity']
+                        if metric_name == "ingredient_embedding":
+                            st.caption(
+                                f"**Overall Dish Similarity: {overall_sim:.4f}** "
+                                f"(Semantic similarity based on aggregated ingredient embeddings, "
+                                f"not exact ingredient matches)"
+                            )
+                        else:
+                            st.caption(f"**Overall Dish Similarity: {overall_sim:.4f}** (Jaccard - based on exact ingredient matches)")
+                        
+                except Exception as e:
+                    st.error(f"Error computing ingredient comparison: {e}")
+                    st.exception(e)
 
 
 if __name__ == "__main__":

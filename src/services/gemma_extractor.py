@@ -40,15 +40,26 @@ Return a JSON object with the following structure:
 {{
     "dish_name": "Name of the dish if mentioned, otherwise 'Unknown Dish'",
     "ingredients": ["ingredient1", "ingredient2", ...],
-    "cuisine": "Type of cuisine if identifiable, otherwise null",
+    "cuisine": "Name of the country or regional cuisine (e.g., 'vietnamese', 'italian', 'sichuan'), or null if not identifiable",
     "confidence": "high" | "medium" | "low"
 }}
 
-Guidelines:
-- Extract all explicitly mentioned ingredients
+Guidelines for ingredients:
+- Extract ALL ingredients mentioned, including:
+  * Main ingredients (meats, vegetables, grains, starches)
+  * Seasonings and spices (salt, pepper, MSG, etc.)
+  * Sauces, condiments, garnishes, toppings, side items
+- Do NOT skip any ingredient, even if marked as optional
 - Infer common ingredients if the dish type is mentioned (e.g., "pizza" implies dough, tomato sauce, cheese)
 - Use lowercase for ingredient names
 - Be specific with ingredient names
+- Remove quantities and measurements, keep only the ingredient name
+- If description contains ingredient lists 
+Guidelines for cuisine:
+- ONLY return a real, recognized country name (e.g., "vietnamese", "japanese", "mexican") or regional cuisine name (e.g., "sichuan", "cantonese", "cajun")
+- Use lowercase for cuisine names
+- If you cannot confidently identify the cuisine or the dish is fusion/international, return null
+- Do NOT make up cuisine names - if unsure, return null
 
 Respond with ONLY the JSON object, no additional text."""
 

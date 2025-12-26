@@ -149,6 +149,10 @@ class PendingIngredient(BaseModel):
     name: str
     created_at: str | None = None
     dish_count: int = 0
+    dish_names: list[str] = Field(
+        default_factory=list,
+        description="Names of dishes containing this pending ingredient",
+    )
     pending_confidence: str | None = Field(
         default=None,
         description="Pending confidence label (e.g., 'medium', 'low')",
@@ -582,7 +586,7 @@ async def get_dish(dish_id: str) -> dict:
 )
 async def search_dishes_by_image(
     image: Annotated[UploadFile, File(description="Dish image to search for")],
-    limit: int = 5,
+    limit: int = 3,
     threshold: float = 0.7,
 ) -> DishSearchResponse:
     """Search for similar dishes using an image.
@@ -689,6 +693,7 @@ async def get_pending_ingredients() -> PendingIngredientsResponse:
             name=p["name"],
             created_at=str(p.get("created_at")) if p.get("created_at") else None,
             dish_count=p.get("dish_count", 0),
+            dish_names=[n for n in p.get("dish_names", []) if n],
             pending_confidence=p.get("pending_confidence"),
             pending_best_score=p.get("pending_best_score"),
             suggested_merges=p.get("suggested_merges") or [],
@@ -833,9 +838,103 @@ async def reject_ingredient(
     )
 
 
+@router.delete(
+    "/ingredients/{name}",
+    response_model=IngredientActionResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+async def delete_ingredient(name: str) -> IngredientActionResponse:
+    """Delete a pending ingredient without merging.
+
+    This permanently removes the ingredient and all its relationships.
+    Dishes that contained this ingredient will no longer have it.
+
+    Args:
+        name: The ingredient name to delete.
+
+    Returns:
+        Success confirmation with deletion details.
+    """
+    processor = get_processor()
+    result = processor.neo4j.delete_ingredient(name)
+
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": f"Ingredient '{name}' not found",
+                "code": "INGREDIENT_NOT_FOUND",
+            },
+        )
+
+    return IngredientActionResponse(
+        success=True,
+        name=name,
+        action="deleted",
+        message=f"Ingredient '{name}' deleted ({result['affected_dishes']} dish relationships removed)",
+    )
+
+
 # =========================================================================
 # User Endpoints
 # =========================================================================
+
+
+class CreateUserRequest(BaseModel):
+    """Request body for creating a new user."""
+
+    name: str = Field(description="User's name")
+    age: int | None = Field(default=None, description="User's age")
+    gender: str | None = Field(default=None, description="User's gender")
+    nationality: str | None = Field(default=None, description="User's nationality")
+    dietary_restrictions: list[str] = Field(
+        default_factory=list,
+        description="List of dietary restriction names to link",
+    )
+
+
+class CreateUserResponse(BaseModel):
+    """Response from create user endpoint."""
+
+    success: bool
+    user_id: str
+    name: str
+    message: str
+
+
+@router.post(
+    "/users",
+    response_model=CreateUserResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["users"],
+)
+async def create_user(request: CreateUserRequest) -> CreateUserResponse:
+    """Create a new user.
+
+    Creates a User node with optional dietary restrictions.
+    The user starts with 0 ratings (cold start scenario).
+
+    Args:
+        request: User data including name and optional restrictions.
+
+    Returns:
+        Created user data with generated user_id.
+    """
+    processor = get_processor()
+    result = processor.neo4j.create_user(
+        name=request.name,
+        age=request.age,
+        gender=request.gender,
+        nationality=request.nationality,
+        dietary_restrictions=request.dietary_restrictions or None,
+    )
+
+    return CreateUserResponse(
+        success=True,
+        user_id=result["user_id"],
+        name=result["name"],
+        message=f"User '{result['name']}' created with 0 ratings (cold start)",
+    )
 
 
 @router.post(
@@ -1053,9 +1152,8 @@ async def get_recommendations(
         recs = rec_service.recommend_image_by_image(user_id=user_id, k=limit)
         method_used = "image_based"
     else:
-        # For collaborative, 'cosine' or 'jaccard' on user vectors
-        if metric not in ["cosine", "jaccard"]:
-            metric = "cosine" # Default for collaborative
+        # For collaborative, only use cosine similarity on user vectors
+        metric = "cosine"  # Only Cosine for CF
             
         recs = rec_service.recommend_dishes(user_id=user_id, k=limit, metric=metric)
         # Check if it fell back to popular
@@ -1080,6 +1178,89 @@ async def get_recommendations(
         ],
         count=len(recs),
         method=method_used,
+    )
+
+
+class ExcludedDishResponse(BaseModel):
+    """A dish excluded by dietary restrictions."""
+
+    dish_id: str
+    name: str
+    violations: list[dict]  # [{ingredient: str, restriction: str}]
+
+
+class ExcludedDishesResponse(BaseModel):
+    """Response with dishes excluded by dietary restrictions."""
+
+    user_id: str
+    restrictions: list[str]
+    excluded_dishes: list[ExcludedDishResponse]
+    count: int
+
+
+@router.get(
+    "/users/{user_id}/excluded-dishes",
+    response_model=ExcludedDishesResponse,
+    responses={404: {"model": ErrorResponse}},
+    tags=["recommendations"],
+)
+async def get_excluded_dishes(
+    user_id: str,
+    limit: int = 10,
+) -> ExcludedDishesResponse:
+    """Get dishes excluded by user's dietary restrictions.
+
+    Shows dishes that would have been recommended but were filtered out
+    due to containing ingredients not suited for the user's dietary restrictions.
+
+    Args:
+        user_id: The user identifier.
+        limit: Maximum number of excluded dishes to return.
+
+    Returns:
+        List of excluded dishes with reasons (violating ingredients).
+    """
+    processor = get_processor()
+    user = processor.neo4j.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "User not found", "code": "USER_NOT_FOUND"},
+        )
+
+    restrictions = user.get("dietary_restrictions", [])
+    if not restrictions:
+        return ExcludedDishesResponse(
+            user_id=user_id,
+            restrictions=[],
+            excluded_dishes=[],
+            count=0,
+        )
+
+    # Get candidate dishes (popular dishes that user hasn't rated)
+    popular_dishes = processor.neo4j.get_popular_dishes(limit=limit * 3, min_ratings=1)
+    user_ratings = processor.neo4j.get_user_ratings(user_id)
+    rated_ids = {r["dish_id"] for r in user_ratings}
+    candidate_ids = [d["dish_id"] for d in popular_dishes if d["dish_id"] not in rated_ids][:limit * 2]
+
+    # Get excluded dishes with reasons
+    excluded = processor.neo4j.get_excluded_dishes_with_reasons(
+        dish_ids=candidate_ids,
+        restriction_names=restrictions,
+    )
+
+    return ExcludedDishesResponse(
+        user_id=user_id,
+        restrictions=restrictions,
+        excluded_dishes=[
+            ExcludedDishResponse(
+                dish_id=d["dish_id"],
+                name=d["name"],
+                violations=d.get("violations", []),
+            )
+            for d in excluded[:limit]
+        ],
+        count=len(excluded),
     )
 
 

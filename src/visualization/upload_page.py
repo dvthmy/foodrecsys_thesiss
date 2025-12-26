@@ -316,11 +316,6 @@ def render_upload_page(api_base_url: str) -> None:
                - Store everything in **Neo4j** database
             4. **Review**: Check extracted ingredients and processing results
             
-            ### Tips for Better Results
-            
-            - **Descriptions matter**: Include all visible ingredients in your descriptions
-            - **Be specific**: "fresh basil leaves" is better than just "herbs"
-            - **Include cooking method**: "grilled chicken" vs "fried chicken"
             """)
         return
     
@@ -357,20 +352,27 @@ def render_upload_page(api_base_url: str) -> None:
                 return
             
             # Prepare files for upload
-            images_data = []
+            images_data: list[tuple[str, bytes, str]] = []
+            names_to_send: list[str] = []
             for file, name in zip(uploaded_files, names):
                 content = file.read()
                 content_type = file.type or "image/jpeg"
-                # Fallback to filename as name if the user left it blank
-                fallback_name = name.strip() or os.path.splitext(file.name)[0]
-                images_data.append((fallback_name, content, content_type))
+
+                # Preserve original filename with extension so the API passes allowed_file checks
+                filename = file.name
+
+                # Fallback to filename stem if the user left the name blank
+                clean_name = name.strip() or os.path.splitext(file.name)[0]
+
+                images_data.append((filename, content, content_type))
+                names_to_send.append(clean_name)
             
             try:
                 with st.spinner("Uploading and starting processing..."):
                     response = api_upload_and_process(
                         api_base_url,
                         images_data,
-                        names,
+                        names_to_send,
                         descriptions,
                     )
                 

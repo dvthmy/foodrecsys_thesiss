@@ -198,7 +198,7 @@ class BatchProcessor:
             canonicalizer: Ingredient canonicalizer service instance.
             max_workers: Maximum concurrent workers. Defaults to config value.
         """
-        self._gemini = extractor
+        self._gemma = extractor
         self._clip = clip_embedder
         self._neo4j = neo4j_service
         self._canonicalizer = canonicalizer
@@ -214,11 +214,11 @@ class BatchProcessor:
 
     @property
     def extractor(self) -> GemmaExtractor:
-        """Get or create  Extractor instance."""
-        if self._gemini is None:
+        """Get or create Extractor instance."""
+        if self._gemma is None:
             # Reuse singleton so the model can be preloaded at setup.
-            self._gemini = get_gemma_extractor()
-        return self._gemini
+            self._gemma = get_gemma_extractor()
+        return self._gemma
 
     @property
     def clip(self) -> CLIPEmbedder:
@@ -263,11 +263,11 @@ class BatchProcessor:
         """Process a single dish item.
 
         Performs two AI operations:
-        1. Extract ingredients from description using Gemini API (text-only)
+        1. Extract ingredients from description using Gemma (text-only)
         2. Generate image embedding using CLIP (for visual similarity)
 
         Design:
-        - Gemini: Analyzes text descriptions to extract ingredients
+        - Gemma: Analyzes text descriptions to extract ingredients
         - CLIP: Generates image embeddings for visual similarity search
 
         Args:
@@ -280,7 +280,7 @@ class BatchProcessor:
             ProcessingResult with extraction, embedding, and storage results.
         """
         try:
-            # Step 1: Extract ingredients using Gemini (from description only)
+            # Step 1: Extract ingredients using Gemma (from description only)
             extraction = None
             if description:
                 logging.info("Extracting ingredients for item %s using Gemma...", item_id)

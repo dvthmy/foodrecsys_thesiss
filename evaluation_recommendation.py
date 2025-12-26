@@ -1,7 +1,7 @@
 """Offline evaluation for recommendation system.
 
 This module provides comprehensive evaluation metrics for the food recommendation system,
-including Precision@k, Recall@k, nDCG@k, and comparison between different algorithms.
+including nDCG@k, Hit Rate, MRR, and comparison between different algorithms.
 
 Evaluation Methods:
 1. Train-Test Split: Split ratings into training and test sets
@@ -36,8 +36,6 @@ class EvaluationResult:
     
     method_name: str
     metric_type: str  # 'cosine', 'jaccard', 'embedding'
-    precision_at_k: float = 0.0
-    recall_at_k: float = 0.0
     ndcg_at_k: float = 0.0
     hit_rate: float = 0.0
     mrr: float = 0.0  # Mean Reciprocal Rank
@@ -51,8 +49,6 @@ class EvaluationResult:
             f"\n{'='*60}\n"
             f"Method: {self.method_name} ({self.metric_type})\n"
             f"{'='*60}\n"
-            f"  Precision@{self.k}: {self.precision_at_k:.4f}\n"
-            f"  Recall@{self.k}:    {self.recall_at_k:.4f}\n"
             f"  nDCG@{self.k}:      {self.ndcg_at_k:.4f}\n"
             f"  Hit Rate:          {self.hit_rate:.4f}\n"
             f"  MRR:               {self.mrr:.4f}\n"
@@ -67,8 +63,6 @@ class UserEvaluation:
     """Holds evaluation results for a single user."""
     
     user_id: str
-    precision: float = 0.0
-    recall: float = 0.0
     ndcg: float = 0.0
     hit: bool = False
     reciprocal_rank: float = 0.0
@@ -363,43 +357,45 @@ class TrainOnlyRecommender:
         user_id: str,
         k: int,
     ) -> list[tuple[str, float]]:
-        """Recommend based on ingredient similarity (Jaccard)."""
-        # Get dishes liked by user from training data
+        """Recommend based on ingredient similarity (Jaccard).
+        
+        NOTE: We compute Jaccard similarity in Python instead of using the Neo4j query
+        because the Neo4j query filters out ALL rated dishes (including test set),
+        which would make proper evaluation impossible.
+        """
+        # Get dishes liked by user from TRAINING data only
         liked_dishes = self._user_liked_dishes.get(user_id, set())
         
         if not liked_dishes:
             return self._get_popular_dishes(k, user_id)
         
-        # Get ingredients for liked dishes
+        # Get ingredients for liked dishes (from training)
         liked_ingredients: set[str] = set()
         for dish_id in liked_dishes:
             dish_info = self.neo4j.get_dish_by_id(dish_id)
-            if dish_info and "ingredients" in dish_info:
+            if dish_info and dish_info.get("ingredients"):
                 liked_ingredients.update(dish_info.get("ingredients", []))
         
         if not liked_ingredients:
             return self._get_popular_dishes(k, user_id)
         
-        # Find similar dishes (excluding training set dishes)
-        user_rated = self._user_rated_dishes.get(user_id, set())
+        # Get all dishes and compute Jaccard similarity
+        # Only exclude dishes rated in TRAINING (not test set)
+        user_rated_in_train = self._user_rated_dishes.get(user_id, set())
         dish_scores: list[tuple[str, float]] = []
         
-        # Get all dishes from database
-        all_dishes = self.neo4j.get_dishes(limit=500)
+        # Fetch all dishes with ingredients
+        all_dishes = self.neo4j.get_all_dishes_ingredients()
         
         for dish in all_dishes:
             dish_id = self._normalize_id(dish.get("dish_id", ""))
             
-            # Skip dishes rated in training
-            if dish_id in user_rated:
+            # Skip dishes rated in TRAINING only (allow test dishes to be recommended)
+            if dish_id in user_rated_in_train:
                 continue
             
-            # Get dish ingredients - need to fetch full dish info since get_dishes() doesn't return ingredients
-            dish_info = self.neo4j.get_dish_by_id(dish_id)
-            if not dish_info:
-                continue
-            
-            dish_ingredients = set(dish_info.get("ingredients", []))
+            # Get dish ingredients
+            dish_ingredients = set(dish.get("ingredients", []))
             
             if not dish_ingredients:
                 continue
@@ -410,7 +406,11 @@ class TrainOnlyRecommender:
             
             if union > 0:
                 similarity = intersection / union
-                dish_scores.append((dish_id, similarity))
+                if similarity > 0:  # Only include non-zero scores
+                    dish_scores.append((dish_id, similarity))
+        
+        if not dish_scores:
+            return self._get_popular_dishes(k, user_id)
         
         # Sort by similarity
         dish_scores.sort(key=lambda x: x[1], reverse=True)
@@ -640,7 +640,6 @@ class RecommendationEvaluator:
     def __init__(
         self,
         neo4j_service: Neo4jService | None = None,
-        test_ratio: float = 0.2,
         min_rating_for_relevant: float = 4.0,
         random_seed: int = 42,
     ):
@@ -648,12 +647,10 @@ class RecommendationEvaluator:
         
         Args:
             neo4j_service: Neo4j service instance.
-            test_ratio: Ratio of ratings to hold out for testing.
             min_rating_for_relevant: Minimum rating to consider a dish as relevant.
             random_seed: Random seed for reproducibility.
         """
         self._neo4j = neo4j_service
-        self.test_ratio = test_ratio
         self.min_rating_for_relevant = min_rating_for_relevant
         self.random_seed = random_seed
         
@@ -696,58 +693,6 @@ class RecommendationEvaluator:
         if isinstance(value, list):
             return str(value[0]) if value else ""
         return str(value)
-    
-    def train_test_split(self) -> None:
-        """Split ratings into training and test sets.
-        
-        Uses stratified split to ensure each user has ratings in both sets.
-        """
-        if not self._all_ratings:
-            self.load_data()
-            
-        random.seed(self.random_seed)
-        
-        # Group ratings by user
-        user_ratings: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for r in self._all_ratings:
-            user_id = self._normalize_id(r["user_id"])
-            user_ratings[user_id].append(r)
-        
-        self._train_ratings = []
-        self._test_ratings = []
-        self._user_test_dishes = defaultdict(set)
-        
-        for user_id, ratings in user_ratings.items():
-            # Skip users with too few ratings
-            if len(ratings) < 3:
-                self._train_ratings.extend(ratings)
-                continue
-                
-            # Shuffle ratings for this user
-            shuffled = ratings.copy()
-            random.shuffle(shuffled)
-            
-            # Split
-            n_test = max(1, int(len(shuffled) * self.test_ratio))
-            test_set = shuffled[:n_test]
-            train_set = shuffled[n_test:]
-            
-            self._train_ratings.extend(train_set)
-            self._test_ratings.extend(test_set)
-            
-            # Track relevant dishes in test set (high ratings)
-            for r in test_set:
-                if r["score"] >= self.min_rating_for_relevant:
-                    dish_id = self._normalize_id(r["dish_id"])
-                    self._user_test_dishes[user_id].add(dish_id)
-        
-        # Build recommender from training data only
-        self._train_recommender = TrainOnlyRecommender(self._train_ratings, self.neo4j)
-        
-        logger.info(
-            f"Split data: {len(self._train_ratings)} train, {len(self._test_ratings)} test, "
-            f"{len(self._user_test_dishes)} users with relevant test items"
-        )
     
     def leave_one_out_split(self) -> None:
         """Leave-one-out split: hold out the last rating per user for testing."""
@@ -848,19 +793,13 @@ class RecommendationEvaluator:
             k: Number of recommendations to consider.
             
         Returns:
-            UserEvaluation with precision, recall, and nDCG scores.
+            UserEvaluation with nDCG, hit rate, and MRR scores.
         """
         rec_dish_ids = [r[0] for r in recommendations[:k]]
         
         # Hits: recommended dishes that are in the relevant set
         hits = [1 if dish_id in relevant_dishes else 0 for dish_id in rec_dish_ids]
         num_hits = sum(hits)
-        
-        # Precision@k = hits / k
-        precision = num_hits / k if k > 0 else 0.0
-        
-        # Recall@k = hits / |relevant|
-        recall = num_hits / len(relevant_dishes) if relevant_dishes else 0.0
         
         # nDCG@k
         ndcg = self._ndcg_at_k(hits, k)
@@ -877,8 +816,6 @@ class RecommendationEvaluator:
         
         return UserEvaluation(
             user_id=user_id,
-            precision=precision,
-            recall=recall,
             ndcg=ndcg,
             hit=hit,
             reciprocal_rank=rr,
@@ -903,7 +840,7 @@ class RecommendationEvaluator:
         logger.info(f"Evaluating Collaborative Filtering ({metric})...")
         
         if self._train_recommender is None:
-            logger.error("No training data available. Run train_test_split first.")
+            logger.error("No training data available. Run leave_one_out_split first.")
             return EvaluationResult(
                 method_name="Collaborative Filtering",
                 metric_type=metric,
@@ -954,8 +891,6 @@ class RecommendationEvaluator:
             )
         
         # Aggregate metrics
-        avg_precision = np.mean([e.precision for e in user_evals])
-        avg_recall = np.mean([e.recall for e in user_evals])
         avg_ndcg = np.mean([e.ndcg for e in user_evals])
         hit_rate = np.mean([1 if e.hit else 0 for e in user_evals])
         mrr = np.mean([e.reciprocal_rank for e in user_evals])
@@ -965,8 +900,6 @@ class RecommendationEvaluator:
         return EvaluationResult(
             method_name="Collaborative Filtering",
             metric_type=metric,
-            precision_at_k=float(avg_precision),
-            recall_at_k=float(avg_recall),
             ndcg_at_k=float(avg_ndcg),
             hit_rate=float(hit_rate),
             mrr=float(mrr),
@@ -995,7 +928,7 @@ class RecommendationEvaluator:
         logger.info(f"Evaluating Content-Based Filtering ({metric})...")
         
         if self._train_recommender is None:
-            logger.error("No training data available. Run train_test_split first.")
+            logger.error("No training data available. Run leave_one_out_split first.")
             return EvaluationResult(
                 method_name="Content-Based Filtering",
                 metric_type=metric,
@@ -1043,8 +976,6 @@ class RecommendationEvaluator:
             )
         
         # Aggregate metrics
-        avg_precision = np.mean([e.precision for e in user_evals])
-        avg_recall = np.mean([e.recall for e in user_evals])
         avg_ndcg = np.mean([e.ndcg for e in user_evals])
         hit_rate = np.mean([1 if e.hit else 0 for e in user_evals])
         mrr = np.mean([e.reciprocal_rank for e in user_evals])
@@ -1054,88 +985,6 @@ class RecommendationEvaluator:
         return EvaluationResult(
             method_name="Content-Based Filtering",
             metric_type=metric,
-            precision_at_k=float(avg_precision),
-            recall_at_k=float(avg_recall),
-            ndcg_at_k=float(avg_ndcg),
-            hit_rate=float(hit_rate),
-            mrr=float(mrr),
-            coverage=float(coverage),
-            avg_popularity=float(avg_popularity),
-            num_users_evaluated=len(user_evals),
-            k=k,
-        )
-    
-    def evaluate_random_baseline(
-        self,
-        k: int = 10,
-    ) -> EvaluationResult:
-        """Evaluate random baseline method.
-        
-        Args:
-            k: Number of recommendations.
-            
-        Returns:
-            EvaluationResult with aggregated metrics.
-        """
-        logger.info("Evaluating Random Baseline...")
-        
-        if self._train_recommender is None:
-            logger.error("No training data available. Run train_test_split first.")
-            return EvaluationResult(
-                method_name="Random Baseline",
-                metric_type="random",
-                k=k,
-            )
-        
-        user_evals: list[UserEvaluation] = []
-        all_recommended_dishes: set[str] = set()
-        popularity_scores: list[float] = []
-        
-        for user_id, relevant_dishes in self._user_test_dishes.items():
-            if not relevant_dishes:
-                continue
-            
-            try:
-                recommendations = self._train_recommender.recommend_random(
-                    user_id=user_id,
-                    k=k,
-                )
-                
-                if not recommendations:
-                    continue
-                
-                user_eval = self.evaluate_user(user_id, recommendations, relevant_dishes, k)
-                user_evals.append(user_eval)
-                
-                for dish_id, score in recommendations[:k]:
-                    all_recommended_dishes.add(dish_id)
-                    popularity_scores.append(self._dish_popularity.get(dish_id, 0))
-                    
-            except Exception as e:
-                logger.warning(f"Error evaluating user {user_id}: {e}")
-                continue
-        
-        if not user_evals:
-            logger.warning("No users were evaluated!")
-            return EvaluationResult(
-                method_name="Random Baseline",
-                metric_type="random",
-                k=k,
-            )
-        
-        avg_precision = np.mean([e.precision for e in user_evals])
-        avg_recall = np.mean([e.recall for e in user_evals])
-        avg_ndcg = np.mean([e.ndcg for e in user_evals])
-        hit_rate = np.mean([1 if e.hit else 0 for e in user_evals])
-        mrr = np.mean([e.reciprocal_rank for e in user_evals])
-        coverage = len(all_recommended_dishes) / len(self._all_dish_ids) if self._all_dish_ids else 0
-        avg_popularity = np.mean(popularity_scores) if popularity_scores else 0
-        
-        return EvaluationResult(
-            method_name="Random Baseline",
-            metric_type="random",
-            precision_at_k=float(avg_precision),
-            recall_at_k=float(avg_recall),
             ndcg_at_k=float(avg_ndcg),
             hit_rate=float(hit_rate),
             mrr=float(mrr),
@@ -1160,7 +1009,7 @@ class RecommendationEvaluator:
         logger.info("Evaluating Popular Baseline...")
         
         if self._train_recommender is None:
-            logger.error("No training data available. Run train_test_split first.")
+            logger.error("No training data available. Run leave_one_out_split first.")
             return EvaluationResult(
                 method_name="Popular Baseline",
                 metric_type="popular",
@@ -1203,8 +1052,6 @@ class RecommendationEvaluator:
                 k=k,
             )
         
-        avg_precision = np.mean([e.precision for e in user_evals])
-        avg_recall = np.mean([e.recall for e in user_evals])
         avg_ndcg = np.mean([e.ndcg for e in user_evals])
         hit_rate = np.mean([1 if e.hit else 0 for e in user_evals])
         mrr = np.mean([e.reciprocal_rank for e in user_evals])
@@ -1214,8 +1061,6 @@ class RecommendationEvaluator:
         return EvaluationResult(
             method_name="Popular Baseline",
             metric_type="popular",
-            precision_at_k=float(avg_precision),
-            recall_at_k=float(avg_recall),
             ndcg_at_k=float(avg_ndcg),
             hit_rate=float(hit_rate),
             mrr=float(mrr),
@@ -1228,13 +1073,13 @@ class RecommendationEvaluator:
     def run_full_evaluation(
         self,
         k: int = 10,
-        split_method: str = "train_test",
     ) -> list[EvaluationResult]:
         """Run full evaluation comparing all methods.
         
+        Uses leave-one-out split method.
+        
         Args:
             k: Number of recommendations to evaluate.
-            split_method: 'train_test' or 'leave_one_out'.
             
         Returns:
             List of EvaluationResult for each method.
@@ -1245,21 +1090,15 @@ class RecommendationEvaluator:
         
         # Load and split data
         self.load_data()
-        
-        if split_method == "leave_one_out":
-            self.leave_one_out_split()
-        else:
-            self.train_test_split()
+        self.leave_one_out_split()
         
         results: list[EvaluationResult] = []
         
         # Evaluate Baselines first (for comparison)
-        results.append(self.evaluate_random_baseline(k=k))
         results.append(self.evaluate_popular_baseline(k=k))
         
-        # Evaluate Collaborative Filtering methods
+        # Evaluate Collaborative Filtering (Cosine only)
         results.append(self.evaluate_collaborative_filtering(k=k, metric="cosine"))
-        results.append(self.evaluate_collaborative_filtering(k=k, metric="jaccard"))
         
         # Evaluate Content-Based methods
         results.append(self.evaluate_content_based(k=k, metric="jaccard"))
@@ -1273,33 +1112,28 @@ class RecommendationEvaluator:
         Args:
             results: List of evaluation results to compare.
         """
-        print("\n" + "=" * 115)
+        print("\n" + "=" * 95)
         print("RECOMMENDATION SYSTEM EVALUATION SUMMARY")
-        print("=" * 115)
-        print(f"{'Method':<35} {'Metric':<12} {'P@k':<10} {'R@k':<10} {'nDCG@k':<10} {'Hit Rate':<10} {'MRR':<10} {'Coverage':<10}")
-        print("-" * 115)
+        print("=" * 95)
+        print(f"{'Method':<35} {'Metric':<12} {'nDCG@k':<10} {'Hit Rate':<10} {'MRR':<10} {'Coverage':<10}")
+        print("-" * 95)
         
         for r in results:
             print(
                 f"{r.method_name:<35} {r.metric_type:<12} "
-                f"{r.precision_at_k:<10.4f} {r.recall_at_k:<10.4f} "
                 f"{r.ndcg_at_k:<10.4f} {r.hit_rate:<10.4f} "
                 f"{r.mrr:<10.4f} {r.coverage:<10.4f}"
             )
         
-        print("=" * 115)
+        print("=" * 95)
         
         # Find best method for each metric
         if results:
-            best_precision = max(results, key=lambda x: x.precision_at_k)
-            best_recall = max(results, key=lambda x: x.recall_at_k)
             best_ndcg = max(results, key=lambda x: x.ndcg_at_k)
             best_hit_rate = max(results, key=lambda x: x.hit_rate)
             best_mrr = max(results, key=lambda x: x.mrr)
             
             print("\nBest Methods:")
-            print(f"  Best Precision@k: {best_precision.method_name} ({best_precision.metric_type}) = {best_precision.precision_at_k:.4f}")
-            print(f"  Best Recall@k:    {best_recall.method_name} ({best_recall.metric_type}) = {best_recall.recall_at_k:.4f}")
             print(f"  Best nDCG@k:      {best_ndcg.method_name} ({best_ndcg.metric_type}) = {best_ndcg.ndcg_at_k:.4f}")
             print(f"  Best Hit Rate:    {best_hit_rate.method_name} ({best_hit_rate.metric_type}) = {best_hit_rate.hit_rate:.4f}")
             print(f"  Best MRR:         {best_mrr.method_name} ({best_mrr.metric_type}) = {best_mrr.mrr:.4f}")
@@ -1315,18 +1149,6 @@ def main():
         type=int,
         default=10,
         help="Number of recommendations to evaluate (default: 10)",
-    )
-    parser.add_argument(
-        "--split",
-        choices=["train_test", "leave_one_out"],
-        default="train_test",
-        help="Data split method (default: train_test)",
-    )
-    parser.add_argument(
-        "--test-ratio",
-        type=float,
-        default=0.2,
-        help="Test set ratio for train_test split (default: 0.2)",
     )
     parser.add_argument(
         "--min-rating",
@@ -1345,13 +1167,12 @@ def main():
     
     # Initialize evaluator
     evaluator = RecommendationEvaluator(
-        test_ratio=args.test_ratio,
         min_rating_for_relevant=args.min_rating,
         random_seed=args.seed,
     )
     
-    # Run evaluation
-    results = evaluator.run_full_evaluation(k=args.top_k, split_method=args.split)
+    # Run evaluation (always uses leave_one_out split)
+    results = evaluator.run_full_evaluation(k=args.top_k)
     
     # Print individual results
     for result in results:

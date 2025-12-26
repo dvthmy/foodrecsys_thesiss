@@ -1,3 +1,4 @@
+
 from src.services.ingredient_embedder import IngredientEmbedder
 
 embedder = IngredientEmbedder(device='cuda')

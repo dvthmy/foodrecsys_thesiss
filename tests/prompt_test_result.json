@@ -1,0 +1,23 @@
+{
+  "dish_name": "Bánh cuốn",
+  "ingredients": [
+    "rice flour",
+    "tapioca starch",
+    "potato starch",
+    "filtered water",
+    "salt",
+    "neutral cooking oil",
+    "dried woodear mushroom",
+    "onion",
+    "ground pork",
+    "salt",
+    "MSG",
+    "ground pepper",
+    "jicama",
+    "green onions",
+    "fish sauce-based dipping sauce"
+  ],
+  "cuisine": "vietnamese",
+  "confidence": "high",
+  "source": "description"
+}
